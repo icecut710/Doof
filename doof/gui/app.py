@@ -8,10 +8,9 @@ import subprocess
 import sys
 import threading
 import time
-from functools import partial
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Qt
+from PySide6.QtCore import QUrl
 from PySide6.QtGui import QColor
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -21,7 +20,6 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 def _root() -> Path:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS)
-    # doof/gui/app.py -> parents[2] = repo root
     return Path(__file__).resolve().parents[2]
 
 
@@ -54,7 +52,6 @@ def _find_free_port(start: int = UI_PORT) -> int:
 
 
 def build_frontend() -> bool:
-    """Ensure frontend/dist/index.html exists; try npm build if missing."""
     index = DIST / "index.html"
     if index.exists():
         print(f"DOOF: frontend build found: {index}")
@@ -66,7 +63,6 @@ def build_frontend() -> bool:
         return False
 
     try:
-        # Windows-friendly: shell=True so npm.cmd is found
         r = subprocess.run(
             "npm run build",
             cwd=str(FRONTEND),
@@ -95,7 +91,6 @@ def start_api_background() -> None:
 
     def run() -> None:
         try:
-            # Give Qt a moment to start
             time.sleep(0.3)
             from doof.api import run_server
 
@@ -109,22 +104,24 @@ def start_api_background() -> None:
 
 def start_static_server(directory: Path, port: int) -> None:
     """Serve dist over HTTP so QWebEngine can load ES modules reliably."""
-    handler = partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
+    root = str(directory.resolve())
 
-    class QuietHandler(handler):  # type: ignore[valid-type,misc]
+    class QuietHandler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=root, **kwargs)
+
         def log_message(self, format: str, *args) -> None:  # noqa: A003
             pass
 
     def run() -> None:
         try:
             httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), QuietHandler)
-            print(f"DOOF: UI static server http://127.0.0.1:{port}/  (dir={directory})")
+            print(f"DOOF: UI static server http://127.0.0.1:{port}/  (dir={root})")
             httpd.serve_forever()
         except Exception as e:
             print(f"DOOF UI server failed: {e}")
 
     threading.Thread(target=run, daemon=True, name="doof-ui").start()
-    # Wait until port accepts connections
     for _ in range(40):
         if _port_open("127.0.0.1", port):
             return
@@ -186,7 +183,6 @@ python -m doof gui</pre>
 
 
 def main() -> int:
-    # Qt WebEngine on Windows can need these before QApplication
     os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --no-sandbox")
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
