@@ -3,6 +3,5 @@
 import runpy
 from pathlib import Path
 root = Path(__file__).resolve().parent
-for name in ("restore_api.py", "restore_app.py"):
-    runpy.run_path(str(root / name))
-print("All restored. Then: cd frontend && npm i && npm run build && python -m doof train")
+runpy.run_path(str(root / "restore_from_data.py"))
+print("Done. Then: python -m doof train && cd frontend && npm i && npm run build")
