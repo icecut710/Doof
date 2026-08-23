@@ -10,10 +10,13 @@ node_modules/
 frontend/node_modules/
 *.egg-info/
 build/
-checkpoints/doof_step_*.pt
+dist/
+frontend/dist/assets/
 *.safetensors
 .DS_Store
 PUSH_TEST.md
 data/cloud.json
 data/settings.json
 data/knowledge.json
+checkpoints/doof_step_*.pt
+# keep doof_v01.pt optional; large — prefer train locally

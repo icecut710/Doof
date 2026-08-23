@@ -7,9 +7,14 @@ a = Analysis(
     datas=[
         ('../frontend/dist', 'frontend/dist'),
         ('../data', 'data'),
-        ('../checkpoints/doof_v01.pt', 'checkpoints'),
+        ('../assets', 'assets'),
+        ('../checkpoints', 'checkpoints'),
     ],
-    hiddenimports=['doof', 'doof.api', 'doof.model', 'doof.inference', 'doof.training', 'doof.tokenizer'],
+    hiddenimports=[
+        'doof', 'doof.api', 'doof.model', 'doof.inference',
+        'doof.training', 'doof.tokenizer', 'doof.cloud', 'doof.gui',
+        'doof.gui.app',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
