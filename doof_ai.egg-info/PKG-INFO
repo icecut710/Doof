@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: doof-ai
+Version: 0.1.0
+Summary: DOOF - a locally trained personal AI
+Requires-Python: >=3.14

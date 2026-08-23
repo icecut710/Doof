@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doof-ai"
+version = "0.1.0"
+description = "DOOF - a locally trained personal AI"
+requires-python = ">=3.14"
+
+[tool.setuptools.packages.find]
+include = ["doof*"]

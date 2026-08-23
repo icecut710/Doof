@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+doof/gui/__init__.py
+doof/gui/app.py
+doof/gui/main_window.py
+doof/inference/__init__.py
+doof/inference/generate.py
+doof/model/__init__.py
+doof/model/transformer.py
+doof/tokenizer/__init__.py
+doof/tokenizer/byte_tokenizer.py
+doof/training/__init__.py
+doof/training/trainer.py
+doof_ai.egg-info/PKG-INFO
+doof_ai.egg-info/SOURCES.txt
+doof_ai.egg-info/dependency_links.txt
+doof_ai.egg-info/top_level.txt

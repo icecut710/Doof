@@ -4,11 +4,12 @@ from pathlib import Path
 
 
 class DOOFTokenizer:
-    """Simple byte-level tokenizer for the first DOOF prototype."""
+    """Byte-level tokenizer used by DOOF."""
 
     PAD = 256
     BOS = 257
     EOS = 258
+
     VOCAB_SIZE = 259
 
     def encode(
@@ -31,11 +32,25 @@ class DOOFTokenizer:
         return tokens
 
     def decode(self, tokens: list[int]) -> str:
-        data = bytes(token for token in tokens if 0 <= token <= 255)
-        return data.decode("utf-8", errors="replace")
+        data = bytes(
+            token
+            for token in tokens
+            if 0 <= token <= 255
+        )
 
-    def encode_file(self, path: str | Path) -> list[int]:
-        text = Path(path).read_text(encoding="utf-8")
+        return data.decode(
+            "utf-8",
+            errors="replace",
+        )
+
+    def encode_file(
+        self,
+        path: str | Path,
+    ) -> list[int]:
+        text = Path(path).read_text(
+            encoding="utf-8"
+        )
+
         return self.encode(text)
 
     @property
