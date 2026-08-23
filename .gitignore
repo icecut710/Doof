@@ -9,9 +9,11 @@ __pycache__/
 node_modules/
 frontend/node_modules/
 *.egg-info/
-dist/
 build/
 checkpoints/doof_step_*.pt
 *.safetensors
 .DS_Store
 PUSH_TEST.md
+data/cloud.json
+data/settings.json
+data/knowledge.json
