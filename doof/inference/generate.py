@@ -29,6 +29,7 @@ class DOOFInference:
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
         self.checkpoint_path = str(checkpoint_file)
+        self.max_seq_len = self.model.max_seq_len
 
     @torch.no_grad()
     def generate(
@@ -42,6 +43,7 @@ class DOOFInference:
             return ""
 
         tokens = self.tokenizer.encode(prompt, add_bos=True, add_eos=False)
+        prompt_len = len(tokens)
         input_ids = torch.tensor([tokens], dtype=torch.long, device=self.device)
 
         for _ in range(max_new_tokens):
@@ -60,4 +62,5 @@ class DOOFInference:
             if next_token.item() == self.tokenizer.EOS:
                 break
 
-        return self.tokenizer.decode(input_ids[0].tolist())
+        generated = input_ids[0].tolist()[prompt_len:]
+        return self.tokenizer.decode(generated).strip()
