@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Restore DOOF critical sources from data/*.b64 if missing."""
 import base64
+import re
 import zlib
 from pathlib import Path
 
@@ -26,20 +27,20 @@ else:
 app_dest = root / "frontend" / "src" / "App.tsx"
 need = True
 if app_dest.exists() and app_dest.stat().st_size > 8000:
-    head = app_dest.read_text(encoding="utf-8", errors="ignore")[:200]
+    head = app_dest.read_text(encoding="utf-8", errors="ignore")[:300]
     if "Atmosphere" in head or "StarField" in head:
         print("skip (exists premium UI)", app_dest, app_dest.stat().st_size)
         need = False
-    elif "useCallback" in head and app_dest.stat().st_size > 25000:
-        print("skip (exists production)", app_dest, app_dest.stat().st_size)
-        need = False
 
 if need:
-    parts = sorted(root.glob("data/App.tsx.b64.p*"))
+    parts = sorted(
+        [p for p in root.glob("data/App.tsx.b64.p*") if re.match(r"App\.tsx\.b64\.p\d+$", p.name)],
+        key=lambda p: int(re.search(r"p(\d+)$", p.name).group(1)),
+    )
     if parts:
         b64 = "".join(p.read_text().strip() for p in parts)
         restore_b64(b64, app_dest)
     else:
-        print("missing App.tsx payload parts")
+        print("missing App.tsx payload parts data/App.tsx.b64.p0..")
 
 print("Done.")
