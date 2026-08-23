@@ -3,23 +3,30 @@
 html, body, #root {
   height: 100%;
   margin: 0;
-  background: #050506;
+  background: #030304;
   color: #d4d4d8;
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-* {
-  box-sizing: border-box;
+* { box-sizing: border-box; }
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.07); border-radius: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+@keyframes doof-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@keyframes doof-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes doof-star-drift {
+  from { transform: translateY(0); }
+  to { transform: translateY(-8px); }
 }
 
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.08);
-  border-radius: 3px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
+.doof-fade { animation: doof-fade-in 0.28s ease-out both; }
+.doof-pulse { animation: doof-pulse 2.2s ease-in-out infinite; }
