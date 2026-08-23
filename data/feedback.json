@@ -1,0 +1,44 @@
+[
+  {
+    "prompt": "What style?",
+    "response": "Kaeden prefers futuristic dark interfaces.",
+    "rating": "bad",
+    "correction": "He likes futuristic dark interfaces with violet accents.",
+    "memories_used": [
+      {
+        "id": "cfffe367-3aca-45a9-8de2-7153ee9ed2be",
+        "content": "Kaeden likes futuristic dark interfaces",
+        "score": 2.3093,
+        "importance": "high",
+        "usage_count": 0,
+        "category": "preferences",
+        "created_by": "system",
+        "created_at": "2026-08-23T22:41:55Z"
+      },
+      {
+        "id": "3e01feea-c98e-45a9-baa2-ac5504dc5bfd",
+        "content": "Kaeden likes futuristic dark interfaces",
+        "score": 2.3093,
+        "importance": "high",
+        "usage_count": 0,
+        "category": "preferences",
+        "created_by": "system",
+        "created_at": "2026-08-23T22:26:33Z"
+      },
+      {
+        "id": "65e29382-5252-4e89-85cd-19318132cc0f",
+        "content": "Kaeden likes futuristic dark interfaces",
+        "score": 2.3093,
+        "importance": "high",
+        "usage_count": 0,
+        "category": "preferences",
+        "created_by": "system",
+        "created_at": "2026-08-23T22:26:20Z"
+      }
+    ],
+    "approved": true,
+    "quality": 85.0,
+    "id": "70995174-f2bb-4a49-aef0-90db2847c42d",
+    "created_at": "2026-08-23T22:41:55Z"
+  }
+]

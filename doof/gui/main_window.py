@@ -25,8 +25,8 @@ class MainWindow(QMainWindow):
         self._maximized = False
 
         self.setWindowTitle("DOOF")
-        self.setMinimumSize(1100, 700)
-        self.resize(1450, 900)
+        self.setMinimumSize(900, 600)
+        self.resize(1100, 700)
 
         # Completely remove the ugly Windows title bar.
         self.setWindowFlags(
