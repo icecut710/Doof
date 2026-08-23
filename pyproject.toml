@@ -5,8 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "doof-ai"
 version = "0.1.0"
-description = "DOOF - a locally trained personal AI"
-requires-python = ">=3.14"
+description = "DOOF - a locally trained personal AI desktop application"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2.0",
+    "PySide6>=6.6.0",
+    "tqdm>=4.66.0",
+    "numpy>=1.26.0",
+]
+
+[project.scripts]
+doof = "doof.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["doof*"]
