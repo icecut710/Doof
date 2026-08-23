@@ -1,3 +1,3 @@
-"""DOOF — local personal AI model and desktop application."""
+"""DOOF — private collaborative AI OS (local-first shared brain)."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
