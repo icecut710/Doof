@@ -9,7 +9,7 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="doof",
-        description="DOOF v0.1 — local personal AI",
+        description="DOOF v0.2 Alpha — private collaborative AI OS",
     )
     parser.add_argument(
         "command",
