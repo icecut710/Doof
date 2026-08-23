@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 import base64, zlib, pathlib
 root = pathlib.Path(__file__).resolve().parents[1]
-# Join App payload: full App.tsx.b64 OR .a + .b0+.b1+.b2 OR parts
-a = root / "data/App.tsx.b64.a"
-b_parts = [root / f"data/App.tsx.b64.b{i}" for i in range(10)]
-b_parts = [p for p in b_parts if p.exists()]
-if a.exists() and b_parts:
-    joined = a.read_text().replace("\n", "") + "".join(p.read_text().replace("\n", "") for p in b_parts)
+# Prefer segment files App.tsx.b64.s0..sn
+segs = sorted(root.glob("data/App.tsx.b64.s*"), key=lambda p: p.name)
+if segs:
+    joined = "".join(p.read_text().replace("\n", "") for p in segs)
     (root / "data/App.tsx.b64").write_text(joined)
-    print("joined from a+b*", len(joined))
-elif (root / "data/App.tsx.b64").exists():
-    print("using existing App.tsx.b64", (root / "data/App.tsx.b64").stat().st_size)
+    print("joined segments", len(joined), "from", len(segs), "files")
 for src, dest in [("data/api.py.b64", "doof/api.py"), ("data/App.tsx.b64", "frontend/src/App.tsx")]:
     p_src = root / src
     if not p_src.exists():
