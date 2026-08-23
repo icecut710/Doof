@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 import base64, zlib, pathlib
 root = pathlib.Path(__file__).resolve().parents[1]
-parts = sorted(root.glob("data/App.tsx.b64.p*"), key=lambda p: p.name)
-if not parts:
-    parts = sorted(root.glob("data/App.tsx.b64.part*"), key=lambda p: p.name)
-if parts:
-    joined = "".join(p.read_text().replace("\n", "") for p in parts)
+# Join App payload: full App.tsx.b64 OR .a + .b0+.b1+.b2 OR parts
+a = root / "data/App.tsx.b64.a"
+b_parts = [root / f"data/App.tsx.b64.b{i}" for i in range(10)]
+b_parts = [p for p in b_parts if p.exists()]
+if a.exists() and b_parts:
+    joined = a.read_text().replace("\n", "") + "".join(p.read_text().replace("\n", "") for p in b_parts)
     (root / "data/App.tsx.b64").write_text(joined)
-    print("joined App.tsx.b64", len(joined))
+    print("joined from a+b*", len(joined))
+elif (root / "data/App.tsx.b64").exists():
+    print("using existing App.tsx.b64", (root / "data/App.tsx.b64").stat().st_size)
 for src, dest in [("data/api.py.b64", "doof/api.py"), ("data/App.tsx.b64", "frontend/src/App.tsx")]:
     p_src = root / src
     if not p_src.exists():
-        print("skip missing", src)
-        continue
-    b64 = p_src.read_text().replace("\n", "")
+        print("skip", src); continue
     try:
+        raw = zlib.decompress(base64.b64decode(p_src.read_text().replace("\n", "")))
         p = root / dest
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(zlib.decompress(base64.b64decode(b64)))
+        p.write_bytes(raw)
         print("restored", dest, p.stat().st_size)
     except Exception as e:
         print("failed", src, e)
