@@ -1,6 +1,7 @@
-"""Wrap Handler.do_GET / do_POST so /api/updates and /api/admin are live.
+"""Wrap Handler.do_GET / do_POST so /api/updates, /api/admin, /api/device are live.
 
-Call ``install()`` from ``run_server`` (or import this module from api).
+Also rebinds legacy memory-only helpers so they cannot return the universal
+"I do not have that in memory yet" refusal.
 """
 from __future__ import annotations
 
@@ -14,9 +15,18 @@ def install() -> None:
     try:
         from doof import api as api_mod
         from doof.api_extra import try_handle
+        from doof.brain import lightweight_answer
     except Exception as e:
         print(f"[api_mount] skip: {e}")
         return
+
+    # Kill the dead universal memory refusal if anything still calls it.
+    try:
+        api_mod._answer_from_memory = (  # type: ignore[attr-defined]
+            lambda prompt, memories=None: lightweight_answer(prompt, memories or [])
+        )
+    except Exception:
+        pass
 
     Handler = getattr(api_mod, "Handler", None)
     if Handler is None:
@@ -62,4 +72,4 @@ def install() -> None:
     Handler.do_GET = do_GET  # type: ignore[method-assign]
     Handler.do_POST = do_POST  # type: ignore[method-assign]
     _installed = True
-    print("[api_mount] updates + admin routes mounted")
+    print("[api_mount] updates + admin + device routes mounted; memory refusal rebound")
