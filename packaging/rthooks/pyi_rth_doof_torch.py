@@ -1,14 +1,20 @@
-# PyInstaller runtime hook — runs before any application import.
-# Frozen CPU builds exclude torch.distributed to keep the zip small.
-# Torch (and some crash dialogs) then report:
-#   ModuleNotFoundError: No module named torchdistribute
-# Install stubs so chat cannot die on that import.
+# PyInstaller runtime hook — runs before application imports.
+#
+# IMPORTANT: Do NOT install a fake ``torch.distributed`` here.
+# Pre-seeding sys.modules["torch.distributed"] with a stub causes:
+#   AttributeError: partially initialized module 'torch' has no attribute 'distributed'
+# because torch.__init__ expects to own that submodule during its own import.
+#
+# We only stub the *misspelled* module name that appears when some crash
+# paths strip dots ("torchdistribute"). Real torch.distributed must come
+# from the packaged Torch install (see doof.spec — no longer excluded).
 
 import sys
 import types
 
 
-def _stub(name: str) -> None:
+def _stub_misspelled() -> None:
+    name = "torchdistribute"
     if name in sys.modules:
         return
     mod = types.ModuleType(name)
@@ -16,8 +22,4 @@ def _stub(name: str) -> None:
     sys.modules[name] = mod
 
 
-_stub("torchdistribute")
-_stub("torch.distributed")
-_stub("torch.distributed.algorithms")
-_stub("torch.distributed.rpc")
-_stub("torch.distributed.run")
+_stub_misspelled()
