@@ -1,7 +1,6 @@
-"""Extra HTTP handlers for updates + admin (v0.3).
+"""Extra HTTP handlers for updates, admin, device preference (v0.3).
 
-Imported by doof.api and registered onto the same BaseHTTPRequestHandler
-subclass so we do not have to rewrite the 90k api.py in one shot.
+Mounted via doof.api_mount onto Handler.do_GET / do_POST.
 """
 from __future__ import annotations
 
@@ -12,9 +11,9 @@ from doof import __version__, __protocol__
 
 
 def _json(handler, code: int, body: dict[str, Any]) -> None:
-    raw = json.dumps(body).encode("utf-8")
+    raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
     handler.send_response(code)
-    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(raw)))
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.end_headers()
@@ -29,12 +28,85 @@ def try_handle(
     get_profile: Callable[[], dict | None],
     read_json: Callable[[], dict],
 ) -> bool:
-    """Return True if the request was handled."""
     profile = None
     try:
         profile = get_profile()
     except Exception:
         profile = None
+
+    # -------- Device preference (local inference hardware) --------
+    if path == "/api/device" and method == "GET":
+        from doof.runtime import (
+            device_options,
+            get_device_preference,
+            probe_hardware,
+            resolve_device,
+            import_torch,
+        )
+
+        hw = probe_hardware(force=True)
+        torch = import_torch()
+        dev_str, dev_label = resolve_device(torch)
+        _json(
+            handler,
+            200,
+            {
+                "preference": get_device_preference(),
+                "active_device": dev_str,
+                "active_label": dev_label,
+                "options": device_options(),
+                "hardware": {
+                    "device_label": hw.get("device_label"),
+                    "cuda_detected": hw.get("cuda_detected"),
+                    "cuda_available": hw.get("cuda_available"),
+                    "cuda_devices": hw.get("cuda_devices"),
+                    "mps_available": hw.get("mps_available"),
+                    "cpu_count": hw.get("cpu_count"),
+                    "ram_gb": hw.get("ram_gb"),
+                    "acceleration": hw.get("acceleration"),
+                    "acceleration_detail": hw.get("acceleration_detail"),
+                    "torch_available": hw.get("torch_available"),
+                    "torch_error": hw.get("torch_error"),
+                },
+            },
+        )
+        return True
+
+    if path == "/api/device" and method == "POST":
+        from doof.runtime import set_device_preference, probe_hardware, resolve_device, import_torch
+
+        body = read_json()
+        pref = set_device_preference(str(body.get("preference") or body.get("device") or "auto"))
+        # Force model reload on next chat
+        try:
+            import doof.api as api_mod
+
+            with api_mod._lock:
+                api_mod._inf = None
+                api_mod._loaded = None
+        except Exception:
+            pass
+        hw = probe_hardware(force=True)
+        torch = import_torch()
+        dev_str, dev_label = resolve_device(torch)
+        _json(
+            handler,
+            200,
+            {
+                "ok": True,
+                "preference": pref,
+                "active_device": dev_str,
+                "active_label": dev_label,
+                "hardware": {
+                    "acceleration": hw.get("acceleration"),
+                    "acceleration_detail": hw.get("acceleration_detail"),
+                    "cuda_devices": hw.get("cuda_devices"),
+                    "torch_available": hw.get("torch_available"),
+                    "torch_error": hw.get("torch_error"),
+                },
+            },
+        )
+        return True
 
     # -------- Updates --------
     if path == "/api/updates/check" and method == "GET":
@@ -114,7 +186,7 @@ def try_handle(
         return True
 
     if path == "/api/admin/pool/pause" and method == "POST":
-        from doof.admin import audit, is_admin, require_admin, set_pool_paused
+        from doof.admin import audit, require_admin, set_pool_paused
 
         try:
             require_admin(profile)
