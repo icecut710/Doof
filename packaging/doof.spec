@@ -73,6 +73,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(ROOT / "assets" / "doof_icon.ico"),
 )
 
 coll = COLLECT(

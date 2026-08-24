@@ -302,7 +302,14 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("DOOF")
     app.setOrganizationName("DOOF")
-    app.setApplicationVersion("0.1.0")
+    app.setApplicationVersion("0.2.0")
+
+    # Window / taskbar icon (same asset as the EXE icon)
+    icon_path = ROOT / "assets" / "doof_icon.ico"
+    if icon_path.exists():
+        from PySide6.QtGui import QIcon
+
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     if not build_frontend():
         QMessageBox.critical(
