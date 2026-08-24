@@ -10,12 +10,15 @@ import { getToken, storeToken, clearToken, type Profile } from "./auth";
 import { cacheGet, cacheSet, cacheAge, cacheInvalidate, dedupe } from "./cache";
 import Login from "./Login";
 import { doofAudio } from "./audio";
+import Boot from "./Boot";
+import StatusTab from "./StatusTab";
+import { friendlyError } from "./errors";
 
 /* =========================================================
    TYPES
    ========================================================= */
 
-type Page = "chat" | "memory" | "training" | "network" | "hardware" | "models" | "settings";
+type Page = "chat" | "memory" | "training" | "status" | "models" | "settings";
 
 type Msg = {
   id: string;
@@ -128,10 +131,17 @@ type Data = Record<string, unknown>;
 
 function serverBase(): string {
   try {
-    return localStorage.getItem("doof_server") || "http://127.0.0.1:8765";
+    const stored = localStorage.getItem("doof_server");
+    if (stored) return stored;
   } catch {
-    return "http://127.0.0.1:8765";
+    /* ignore */
   }
+  if (typeof window !== "undefined") {
+    const port = window.location.port;
+    // Desktop shell serves UI on 8766 / 3000 and API on 8765.
+    if (port === "8766" || port === "3000") return "http://127.0.0.1:8765";
+  }
+  return "";
 }
 
 async function api<T = Data>(path: string, opts?: RequestInit): Promise<T> {
@@ -232,7 +242,7 @@ function GlassButton({
 
   const sizeCls =
     size === "sm"
-      ? "px-2.5 py-1 text-[9px]"
+      ? "px-2.5 py-1 text-[12px]"
       : size === "lg"
         ? "px-5 py-2.5 text-[11px]"
         : "px-3.5 py-1.5 text-[10px]";
@@ -277,7 +287,7 @@ function StatusBadge({
     <span
       className={[
         "inline-flex items-center gap-1.5 rounded-full border",
-        "px-2 py-0.5 text-[8px] uppercase tracking-[0.13em]",
+        "px-2 py-0.5 text-[12px] uppercase tracking-[0.13em]",
         toneCls,
       ].join(" ")}
     >
@@ -308,7 +318,7 @@ function MetricCard({
           : "border-white/[0.045] bg-white/[0.012]",
       ].join(" ")}
     >
-      <div className="text-[8px] font-medium uppercase tracking-[0.14em] text-zinc-700">
+      <div className="text-[12px] font-medium uppercase tracking-[0.14em] text-zinc-700">
         {label}
       </div>
       <div
@@ -320,7 +330,7 @@ function MetricCard({
         {value}
       </div>
       {sub && (
-        <div className="mt-0.5 text-[8px] text-zinc-700">{sub}</div>
+        <div className="mt-0.5 text-[12px] text-zinc-700">{sub}</div>
       )}
     </div>
   );
@@ -456,10 +466,9 @@ const NAV_ITEMS: { id: Page; label: string; icon: string; section: string }[] = 
   { id: "chat", label: "Chat", icon: "*", section: "CHAT" },
   { id: "memory", label: "Memory", icon: "+", section: "CHAT" },
   { id: "training", label: "Training", icon: "T", section: "CHAT" },
-  { id: "network", label: "Network", icon: "N", section: "COMPUTE" },
-  { id: "hardware", label: "Hardware", icon: "H", section: "COMPUTE" },
-  { id: "models", label: "Brain", icon: "B", section: "SYSTEM" },
-  { id: "settings", label: "Settings", icon: "S", section: "SYSTEM" },
+  { id: "status", label: "Status", icon: "S", section: "HOUSE" },
+  { id: "models", label: "Brain", icon: "B", section: "HOUSE" },
+  { id: "settings", label: "Settings", icon: "=", section: "HOUSE" },
 ];
 
 function Sidebar({
@@ -476,7 +485,7 @@ function Sidebar({
   trainRunning: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
-  const sections = ["CHAT", "COMPUTE", "SYSTEM"];
+  const sections = ["CHAT", "HOUSE"];
   const gpuName =
     hw?.cuda_available && hw.cuda_devices[0]
       ? hw.cuda_devices[0].name
@@ -494,13 +503,13 @@ function Sidebar({
     >
       {/* Logo */}
       <div className="flex h-[46px] shrink-0 items-center gap-2 border-b border-white/[0.045] px-3">
-        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[8px] border border-violet-400/20 bg-violet-500/[0.065] text-[9px] font-bold text-violet-300 shadow-[0_0_14px_rgba(124,58,237,0.1)] doof-logo-beat">
+        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[8px] border border-violet-400/20 bg-violet-500/[0.065] text-[12px] font-bold text-violet-300 shadow-[0_0_14px_rgba(124,58,237,0.1)] doof-logo-beat">
           D
         </div>
         {!collapsed && (
           <div className="min-w-0 flex-1">
             <div className="text-[11px] font-semibold tracking-tight text-zinc-100">DOOF</div>
-            <div className="text-[7px] uppercase tracking-[0.18em] text-zinc-700">
+            <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-700">
               v0.2 · local
             </div>
           </div>
@@ -510,7 +519,7 @@ function Sidebar({
             type="button"
             title="Collapse sidebar"
             onClick={() => setCollapsed(true)}
-            className="text-[9px] text-zinc-800 transition hover:text-violet-300"
+            className="text-[12px] text-zinc-800 transition hover:text-violet-300"
           >
             {'<'}
           </button>
@@ -534,7 +543,7 @@ function Sidebar({
           if (!items.length) return null;
           return (
             <div key={section} className="mb-3">
-              <div className="mb-1 px-2 text-[7px] font-medium uppercase tracking-[0.2em] text-zinc-800">
+              <div className="mb-1 px-2 text-[11px] font-medium uppercase tracking-[0.2em] text-zinc-800">
                 {section}
               </div>
               {items.map((item) => {
@@ -548,7 +557,7 @@ function Sidebar({
                     className={[
                       "mb-0.5 flex w-full items-center gap-2",
                       "rounded-xl px-2 py-1.5 text-left",
-                      "text-[10px] transition-all duration-200",
+                      "text-[13px] transition-all duration-200",
                       active
                         ? "bg-violet-500/[0.11] text-violet-200 shadow-[inset_0_0_0_1px_rgba(139,92,246,0.18),0_0_18px_rgba(139,92,246,0.12)] doof-nav-active-beat"
                         : "text-zinc-400 hover:bg-white/[0.025] hover:text-zinc-100",
@@ -556,7 +565,7 @@ function Sidebar({
                   >
                     <span
                       className={[
-                        "w-3.5 shrink-0 text-center text-[8px]",
+                        "w-3.5 shrink-0 text-center text-[12px]",
                         active ? "text-violet-400" : "text-zinc-500",
                       ].join(" ")}
                     >
@@ -578,12 +587,12 @@ function Sidebar({
       <div className="shrink-0 border-t border-white/[0.045] px-2.5 py-2">
         <div className="flex items-center gap-1.5">
           <StatusDot on={online} />
-          <span className="text-[8px] uppercase tracking-[0.13em] text-zinc-400">
-            {online ? "BRAIN ONLINE" : "BRAIN OFFLINE"}
+          <span className="text-[12px] uppercase tracking-[0.13em] text-zinc-400">
+            {online ? "Shawarmas: Fresh" : "Lost in the desert"}
           </span>
         </div>
-        <div className="mt-0.5 truncate text-[8px] text-zinc-500" title={gpuName}>
-          {gpuName}
+        <div className="mt-0.5 truncate text-[12px] text-zinc-500" title={gpuName}>
+          {online ? "All core services responding" : "The brain is unreachable"}
         </div>
       </div>
     </aside>
@@ -666,10 +675,16 @@ function ChatTab({
         ),
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const friendly = friendlyError(err);
       setMsgs((cur) =>
         cur.map((m) =>
-          m.id === msgId ? { ...m, text: `Error: ${msg}`, pending: false } : m,
+          m.id === msgId
+            ? {
+                ...m,
+                text: `${friendly.title}\n${friendly.body}`,
+                pending: false,
+              }
+            : m,
         ),
       );
     } finally {
@@ -743,13 +758,13 @@ function ChatTab({
                 <h1 className="mt-2.5 text-[17px] font-semibold tracking-[-0.03em] text-zinc-100">
                   DOOF
                 </h1>
-                <p className="mt-0.5 text-[9px] text-zinc-500">
+                <p className="mt-0.5 text-[12px] text-zinc-500">
                   your little evolving brain · ready to learn
                 </p>
                 <div className="mt-3 flex flex-wrap justify-center gap-1.5">
                   <StatusBadge tone={online ? "online" : "neutral"}>
                     <StatusDot on={online} />
-                    {online ? "BRAIN ONLINE" : "COULDN'T REACH THE BRAIN"}
+                    {online ? "Shawarmas: Fresh" : "Lost in the desert"}
                   </StatusBadge>
                 </div>
                 <div className="mt-4 flex flex-wrap justify-center gap-1.5">
@@ -759,7 +774,7 @@ function ChatTab({
                       type="button"
                       disabled={!online || busy}
                       onClick={() => void send(s)}
-                      className="rounded-full border border-white/[0.055] bg-black/50 px-2.5 py-1.5 text-[8px] text-zinc-600 transition-all hover:border-violet-500/25 hover:bg-violet-500/[0.055] hover:text-zinc-300 disabled:opacity-30"
+                      className="rounded-full border border-white/[0.055] bg-black/50 px-2.5 py-1.5 text-[12px] text-zinc-600 transition-all hover:border-violet-500/25 hover:bg-violet-500/[0.055] hover:text-zinc-300 disabled:opacity-30"
                     >
                       {s}
                     </button>
@@ -777,7 +792,7 @@ function ChatTab({
                   <div
                     className={[
                       "max-w-[82%] rounded-2xl px-3 py-2",
-                      "text-[11px] leading-relaxed",
+                      "text-[13px] leading-relaxed",
                       msg.role === "user"
                         ? "border border-violet-400/10 bg-violet-600/20 text-zinc-100"
                         : "border border-white/[0.05] bg-[#09090a]/95 text-zinc-100",
@@ -800,7 +815,7 @@ function ChatTab({
                         {msg.memoriesUsed.slice(0, 3).map((m) => (
                           <span
                             key={m.id}
-                            className="rounded-full border border-violet-400/10 bg-violet-500/[0.04] px-1.5 py-0.5 text-[7px] text-violet-400/60"
+                            className="rounded-full border border-violet-400/10 bg-violet-500/[0.04] px-1.5 py-0.5 text-[11px] text-violet-400/60"
                             title={m.content}
                           >
                             ✓ {m.content.slice(0, 28)}…
@@ -815,14 +830,14 @@ function ChatTab({
                       <button
                         type="button"
                         onClick={() => void sendFeedback(msg, "good")}
-                        className="rounded-lg border border-white/[0.04] bg-white/[0.012] px-2 py-0.5 text-[8px] text-zinc-400 transition-all hover:border-emerald-400/20 hover:bg-emerald-400/[0.04] hover:text-emerald-400"
+                        className="rounded-lg border border-white/[0.04] bg-white/[0.012] px-2 py-0.5 text-[12px] text-zinc-400 transition-all hover:border-emerald-400/20 hover:bg-emerald-400/[0.04] hover:text-emerald-400"
                       >
                         👍 Good
                       </button>
                       <button
                         type="button"
                         onClick={() => void sendFeedback(msg, "bad")}
-                        className="rounded-lg border border-white/[0.04] bg-white/[0.012] px-2 py-0.5 text-[8px] text-zinc-400 transition-all hover:border-rose-400/20 hover:bg-rose-400/[0.04] hover:text-rose-400"
+                        className="rounded-lg border border-white/[0.04] bg-white/[0.012] px-2 py-0.5 text-[12px] text-zinc-400 transition-all hover:border-rose-400/20 hover:bg-rose-400/[0.04] hover:text-rose-400"
                       >
                         👎 Teach
                       </button>
@@ -831,7 +846,7 @@ function ChatTab({
 
                   {/* Feedback state */}
                   {msg.role === "doof" && !msg.pending && msg.feedback === "good" && (
-                    <div className="mt-1 text-[7px] text-emerald-400/60">
+                    <div className="mt-1 text-[11px] text-emerald-400/60">
                       ✓ Saved to training data
                     </div>
                   )}
@@ -840,7 +855,7 @@ function ChatTab({
                   {msg.role === "doof" && msg.correcting && (
                     <div className="mt-2 w-full max-w-[82%]">
                       <GlassPanel className="p-2.5">
-                        <div className="mb-1.5 text-[8px] uppercase tracking-[0.12em] text-zinc-700">
+                        <div className="mb-1.5 text-[12px] uppercase tracking-[0.12em] text-zinc-700">
                           What should DOOF have said?
                         </div>
                         <textarea
@@ -916,12 +931,12 @@ function ChatTab({
             type="button"
             onClick={() => void send()}
             disabled={!online || busy || !input.trim()}
-            className="rounded-2xl border border-violet-400/20 bg-violet-600/80 px-3.5 py-2 text-[9px] font-medium text-white shadow-[0_5px_20px_rgba(124,58,237,0.12)] transition-all hover:bg-violet-500 disabled:opacity-25"
+            className="rounded-2xl border border-violet-400/20 bg-violet-600/80 px-3.5 py-2 text-[12px] font-medium text-white shadow-[0_5px_20px_rgba(124,58,237,0.12)] transition-all hover:bg-violet-500 disabled:opacity-25"
           >
             {busy ? "···" : "Send"}
           </button>
         </div>
-        <div className="mt-1 text-center text-[7px] uppercase tracking-[0.15em] text-zinc-600">
+        <div className="mt-1 text-center text-[11px] uppercase tracking-[0.15em] text-zinc-600">
           DOOF · local inference
         </div>
       </div>
@@ -998,7 +1013,7 @@ function MemoryTab({ online }: { online: boolean }) {
       {/* Header */}
       <div className="flex items-baseline justify-between">
         <div>
-          <div className="text-[8px] uppercase tracking-[0.18em] text-zinc-500">
+          <div className="text-[12px] uppercase tracking-[0.18em] text-zinc-500">
             EVERYTHING DOOF REMEMBERS · FOREVER
           </div>
           <div className="mt-1 text-[13px] font-semibold text-zinc-100">MEMORY</div>
@@ -1032,7 +1047,7 @@ function MemoryTab({ online }: { online: boolean }) {
       {/* Add form */}
       {showAdd && (
         <GlassPanel className="p-3" glow>
-          <div className="mb-2 text-[8px] uppercase tracking-[0.15em] text-zinc-700">
+          <div className="mb-2 text-[12px] uppercase tracking-[0.15em] text-zinc-700">
             New Memory
           </div>
           <textarea
@@ -1046,7 +1061,7 @@ function MemoryTab({ online }: { online: boolean }) {
             <select
               value={newImportance}
               onChange={(e) => setNewImportance(e.target.value as "low" | "medium" | "high")}
-              className="rounded-lg border border-white/[0.05] bg-black/50 px-2 py-1 text-[9px] text-zinc-400 outline-none"
+              className="rounded-lg border border-white/[0.05] bg-black/50 px-2 py-1 text-[12px] text-zinc-400 outline-none"
             >
               <option value="low">Low importance</option>
               <option value="medium">Medium importance</option>
@@ -1056,7 +1071,7 @@ function MemoryTab({ online }: { online: boolean }) {
               value={newCategory}
               onChange={(e) => setNewCategory(e.target.value)}
               placeholder="Category"
-              className="flex-1 rounded-lg border border-white/[0.05] bg-black/50 px-2 py-1 text-[9px] text-zinc-400 outline-none placeholder:text-zinc-800 focus:border-violet-500/20"
+              className="flex-1 rounded-lg border border-white/[0.05] bg-black/50 px-2 py-1 text-[12px] text-zinc-400 outline-none placeholder:text-zinc-800 focus:border-violet-500/20"
             />
             <GlassButton size="sm" onClick={() => void addMemory()}>
               Save
@@ -1083,7 +1098,7 @@ function MemoryTab({ online }: { online: boolean }) {
             >
               <div className="min-w-0 flex-1">
                 <div className="text-[10px] leading-snug text-zinc-300">{mem.content}</div>
-                <div className="mt-1 flex items-center gap-2 text-[8px] text-zinc-700">
+                <div className="mt-1 flex items-center gap-2 text-[12px] text-zinc-700">
                   <span>{mem.category}</span>
                   <span>·</span>
                   <span>Used {mem.usage_count}×</span>
@@ -1116,7 +1131,7 @@ function MemoryTab({ online }: { online: boolean }) {
                         } catch { /* ignore */ }
                       })();
                     }}
-                    className="text-[8px] text-zinc-800 transition hover:text-violet-300"
+                    className="text-[12px] text-zinc-800 transition hover:text-violet-300"
                   >
                     Edit
                   </button>
@@ -1137,14 +1152,14 @@ function MemoryTab({ online }: { online: boolean }) {
                         .then(() => void load())
                         .catch(() => {})
                     }
-                    className="text-[8px] text-zinc-800 transition hover:text-emerald-400"
+                    className="text-[12px] text-zinc-800 transition hover:text-emerald-400"
                   >
                     Promote to training
                   </button>
                   <button
                     type="button"
                     onClick={() => void deleteMemory(mem.id)}
-                    className="text-[8px] text-zinc-800 transition hover:text-rose-400"
+                    className="text-[12px] text-zinc-800 transition hover:text-rose-400"
                   >
                     Delete
                   </button>
@@ -1246,7 +1261,7 @@ function TrainingTab({ online }: { online: boolean }) {
       {/* Header */}
       <div className="mb-4 flex items-start justify-between">
         <div>
-          <div className="text-[8px] uppercase tracking-[0.18em] text-zinc-500">
+          <div className="text-[12px] uppercase tracking-[0.18em] text-zinc-500">
             MEMORY → FEEDBACK → TRAINING DATA → NEW BRAIN
           </div>
           <div className="mt-1 flex items-center gap-2">
@@ -1260,7 +1275,7 @@ function TrainingTab({ online }: { online: boolean }) {
         </div>
         <div className="text-right">
           {train.dataset_version && (
-            <div className="text-[8px] text-zinc-700">Dataset: {train.dataset_version}</div>
+            <div className="text-[12px] text-zinc-700">Dataset: {train.dataset_version}</div>
           )}
         </div>
       </div>
@@ -1304,30 +1319,30 @@ function TrainingTab({ online }: { online: boolean }) {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
               <div className="text-center">
-                <div className="text-[8px] uppercase tracking-[0.12em] text-zinc-700">Loss</div>
+                <div className="text-[12px] uppercase tracking-[0.12em] text-zinc-700">Loss</div>
                 <div className="text-[16px] font-semibold tabular-nums text-violet-300">
                   {train.loss != null ? Number(train.loss).toFixed(4) : "—"}
                 </div>
               </div>
               {train.speed != null && (
                 <div className="text-center">
-                  <div className="text-[8px] uppercase tracking-[0.12em] text-zinc-700">Speed</div>
+                  <div className="text-[12px] uppercase tracking-[0.12em] text-zinc-700">Speed</div>
                   <div className="text-[16px] font-semibold tabular-nums text-zinc-200">
                     {train.speed.toFixed(1)}
-                    <span className="text-[9px] text-zinc-600"> it/s</span>
+                    <span className="text-[12px] text-zinc-600"> it/s</span>
                   </div>
                 </div>
               )}
               {etaStr && (
                 <div className="text-center">
-                  <div className="text-[8px] uppercase tracking-[0.12em] text-zinc-700">ETA</div>
+                  <div className="text-[12px] uppercase tracking-[0.12em] text-zinc-700">ETA</div>
                   <div className="text-[16px] font-semibold tabular-nums text-zinc-200">
                     {etaStr}
                   </div>
                 </div>
               )}
             </div>
-            <div className="text-[9px] text-zinc-600">{train.message}</div>
+            <div className="text-[12px] text-zinc-600">{train.message}</div>
           </div>
         </GlassPanel>
       )}
@@ -1335,7 +1350,7 @@ function TrainingTab({ online }: { online: boolean }) {
       {/* Training queue */}
       {train.training_queue && train.training_queue.length > 0 && (
         <GlassPanel className="mb-3 p-3">
-          <div className="mb-1.5 text-[8px] uppercase tracking-[0.12em] text-zinc-700">
+          <div className="mb-1.5 text-[12px] uppercase tracking-[0.12em] text-zinc-700">
             Training Queue ({train.training_queue.length})
           </div>
           <div className="space-y-1">
@@ -1344,12 +1359,12 @@ function TrainingTab({ online }: { online: boolean }) {
                 key={job.id}
                 className="flex items-center justify-between rounded-lg border border-white/[0.04] bg-black/30 px-2.5 py-1.5"
               >
-                <div className="flex items-center gap-2 text-[9px]">
+                <div className="flex items-center gap-2 text-[12px]">
                   <span className="text-violet-400/60">↯</span>
                   <span className="text-zinc-300">{job.type}</span>
                   <StatusBadge tone="warning">Queued</StatusBadge>
                 </div>
-                <div className="text-[7px] text-zinc-600">
+                <div className="text-[11px] text-zinc-600">
                   Priority {job.priority} · {job.assigned_worker ?? "Unassigned"}
                 </div>
               </div>
@@ -1361,7 +1376,7 @@ function TrainingTab({ online }: { online: boolean }) {
       {/* Running jobs */}
       {train.running_jobs && train.running_jobs.length > 0 && (
         <GlassPanel className="mb-3 p-3">
-          <div className="mb-1.5 text-[8px] uppercase tracking-[0.12em] text-zinc-700">
+          <div className="mb-1.5 text-[12px] uppercase tracking-[0.12em] text-zinc-700">
             Running Jobs ({train.running_jobs.length})
           </div>
           <div className="space-y-1">
@@ -1370,8 +1385,8 @@ function TrainingTab({ online }: { online: boolean }) {
                 key={job.id}
                 className="flex items-center justify-between rounded-lg border border-white/[0.04] bg-black/30 px-2.5 py-1.5"
               >
-                <div className="text-[9px] text-zinc-300">Job {job.id.slice(0, 8)}…</div>
-                <div className="flex items-center gap-3 text-[8px] text-zinc-600">
+                <div className="text-[12px] text-zinc-300">Job {job.id.slice(0, 8)}…</div>
+                <div className="flex items-center gap-3 text-[12px] text-zinc-600">
                   {job.epoch != null && <span>Epoch {job.epoch}</span>}
                   {job.total_epochs != null && <span>/ {job.total_epochs}</span>}
                   {job.step != null && <span>Step {job.step}</span>}
@@ -1428,10 +1443,10 @@ function TrainingTab({ online }: { online: boolean }) {
       {/* Job logs */}
       {showLogs && (
         <GlassPanel className="mb-3 p-3">
-          <div className="mb-1.5 text-[8px] uppercase tracking-[0.15em] text-zinc-700">
+          <div className="mb-1.5 text-[12px] uppercase tracking-[0.15em] text-zinc-700">
             Training Job Log
           </div>
-          <div className="max-h-[140px] space-y-1 overflow-y-auto font-mono text-[8px] text-zinc-600">
+          <div className="max-h-[140px] space-y-1 overflow-y-auto font-mono text-[12px] text-zinc-600">
             {(jobs.length === 0 && <div>No training jobs yet.</div>) ||
               jobs.map((j) => (
                 <div key={j.id} className="truncate">
@@ -1447,7 +1462,7 @@ function TrainingTab({ online }: { online: boolean }) {
 
       {/* Loss curve */}
       <GlassPanel className="p-3.5">
-        <div className="mb-2 text-[8px] uppercase tracking-[0.15em] text-zinc-700">
+        <div className="mb-2 text-[12px] uppercase tracking-[0.15em] text-zinc-700">
           Loss Curve
         </div>
         {history.length === 0 ? (
@@ -1490,7 +1505,7 @@ function TrainingTab({ online }: { online: boolean }) {
    NETWORK TAB
    ========================================================= */
 
-function NetworkTab({ online }: { online: boolean }) {
+function LegacyNetworkTab({ online }: { online: boolean }) {
   const [nodes, setNodes] = useState<NodeItem[]>([]);
   const [totalVram, setTotalVram] = useState(0);
 
@@ -1702,7 +1717,7 @@ function ModelsTab({ online }: { online: boolean }) {
     <div className="flex-1 overflow-y-auto p-4">
       {/* Header */}
       <div className="mb-4">
-        <div className="text-[8px] uppercase tracking-[0.18em] text-zinc-700">
+        <div className="text-[12px] uppercase tracking-[0.18em] text-zinc-700">
           DOOF BRAIN VERSIONS
         </div>
       </div>
@@ -1729,7 +1744,7 @@ function ModelsTab({ online }: { online: boolean }) {
       {/* Production brain */}
       {production && (
         <div className="mb-3">
-          <div className="mb-1.5 text-[8px] uppercase tracking-[0.15em] text-zinc-700">
+          <div className="mb-1.5 text-[12px] uppercase tracking-[0.15em] text-zinc-700">
             Current Brain
           </div>
           <GlassPanel className="flex items-center justify-between p-3" glow>
@@ -1740,7 +1755,7 @@ function ModelsTab({ online }: { online: boolean }) {
                 </span>
                 {statusBadge("production")}
               </div>
-              <div className="mt-0.5 text-[9px] text-zinc-600">
+              <div className="mt-0.5 text-[12px] text-zinc-600">
                 {production.loss != null && `Loss ${Number(production.loss).toFixed(3)} · `}
                 {production.size_mb != null && `${Number(production.size_mb).toFixed(1)} MB`}
                 {production.step != null && ` · Step ${production.step}`}
@@ -1758,7 +1773,7 @@ function ModelsTab({ online }: { online: boolean }) {
       )}
 
       {/* Version history */}
-      <div className="mb-1.5 text-[8px] uppercase tracking-[0.15em] text-zinc-700">
+      <div className="mb-1.5 text-[12px] uppercase tracking-[0.15em] text-zinc-700">
         All Versions
       </div>
       <div className="space-y-1.5">
@@ -1777,12 +1792,12 @@ function ModelsTab({ online }: { online: boolean }) {
                 <span className="truncate text-[10px] text-zinc-300">{ck.name}</span>
                 {statusBadge(ck.status)}
                 {ck.loaded && (
-                  <span className="text-[7px] uppercase tracking-[0.1em] text-emerald-400/60">
+                  <span className="text-[11px] uppercase tracking-[0.1em] text-emerald-400/60">
                     Active
                   </span>
                 )}
               </div>
-              <div className="mt-0.5 text-[8px] text-zinc-700">
+              <div className="mt-0.5 text-[12px] text-zinc-700">
                 {ck.loss != null && `Loss ${Number(ck.loss).toFixed(3)}`}
                 {ck.size_mb != null && ` · ${Number(ck.size_mb).toFixed(1)} MB`}
                 {ck.step != null && ` · Step ${ck.step}`}
@@ -1860,13 +1875,13 @@ function SettingsTab({
       <div className="mx-auto max-w-lg space-y-5">
         {/* Inference */}
         <section>
-          <div className="mb-2 text-[8px] uppercase tracking-[0.16em] text-zinc-700">
+          <div className="mb-2 text-[12px] uppercase tracking-[0.16em] text-zinc-700">
             Inference
           </div>
           <GlassPanel className="space-y-4 p-3.5">
             {SLIDERS.map(([key, min, max, step]) => (
               <label key={key} className="block">
-                <div className="mb-1.5 flex justify-between text-[9px]">
+                <div className="mb-1.5 flex justify-between text-[12px]">
                   <span className="text-zinc-600">{key.replace(/_/g, " ")}</span>
                   <span className="tabular-nums text-zinc-400">{sett[key]}</span>
                 </div>
@@ -1898,7 +1913,7 @@ function SettingsTab({
         {/* Hardware */}
         {hw && (
           <section>
-            <div className="mb-2 text-[8px] uppercase tracking-[0.16em] text-zinc-700">
+            <div className="mb-2 text-[12px] uppercase tracking-[0.16em] text-zinc-700">
               Hardware
             </div>
             <div className="grid grid-cols-2 gap-1.5">
@@ -1920,27 +1935,27 @@ function SettingsTab({
 
         {/* Cloud */}
         <section>
-          <div className="mb-2 text-[8px] uppercase tracking-[0.16em] text-zinc-700">
+          <div className="mb-2 text-[12px] uppercase tracking-[0.16em] text-zinc-700">
             Cloud / Supabase
           </div>
           <GlassPanel className="flex items-center gap-2 p-3">
             <StatusDot on={Boolean(cloud.connected)} />
-            <span className="text-[9px] text-zinc-600">
+            <span className="text-[12px] text-zinc-600">
               {String(cloud.message ?? cloud.status ?? "Local mode · offline only")}
             </span>
           </GlassPanel>
-          <div className="mt-1.5 text-[8px] text-zinc-800">
-            Set DOOF_SUPABASE_URL and DOOF_SUPABASE_ANON_KEY in your environment to enable cloud sync.
+          <div className="mt-1.5 text-[12px] text-zinc-800">
+            Set SUPABASE_URL and SUPABASE_ANON_KEY to enable cloud sync. Local mode still works.
           </div>
         </section>
 
         {/* Ambient */}
         <section>
-          <div className="mb-2 text-[8px] uppercase tracking-[0.16em] text-zinc-700">
+          <div className="mb-2 text-[12px] uppercase tracking-[0.16em] text-zinc-700">
             Ambient
           </div>
           <GlassPanel className="flex items-center justify-between gap-3 p-3">
-            <div className="text-[9px] text-zinc-600">
+            <div className="text-[12px] text-zinc-600">
               Quiet Arabic rap · loops after sign-in
             </div>
             <MusicControl />
@@ -1950,7 +1965,7 @@ function SettingsTab({
         {/* Account */}
         {onLogout && (
           <section>
-            <div className="mb-2 text-[8px] uppercase tracking-[0.16em] text-zinc-700">Account</div>
+            <div className="mb-2 text-[12px] uppercase tracking-[0.16em] text-zinc-700">Account</div>
             <GlassButton variant="danger" onClick={onLogout}>
               Sign out
             </GlassButton>
@@ -1959,15 +1974,17 @@ function SettingsTab({
 
         {/* About */}
         <section>
-          <div className="mb-2 text-[8px] uppercase tracking-[0.16em] text-zinc-700">About</div>
-          <GlassPanel className="p-3.5 text-[9px] leading-relaxed text-zinc-700">
+          <div className="mb-2 text-[12px] uppercase tracking-[0.16em] text-zinc-700">About</div>
+          <GlassPanel className="p-3.5 text-[12px] leading-relaxed text-zinc-700">
             DOOF v0.2 Alpha · decoder-only Transformer · local-first private AI OS
             <br />
             Fueled by Big Ol&apos; Rusty Tuna Cans, Shawarmas and Red Bull.
             <br />
             Intelligence: memory, RAG, quality scoring, dataset builder, evaluation
             <br />
-            Compute: single-worker job scheduler · Supabase-ready architecture
+            Compute: job-level pool · one job, one node · never silent remote use
+            <br />
+            Fueled by shawarmas, Lebanon, and the occasional rusty tuna can.
           </GlassPanel>
         </section>
       </div>
@@ -1983,13 +2000,11 @@ function SettingsTab({
 function MusicControl() {
   const [muted, setMuted] = useState(doofAudio.isMuted());
   const [vol, setVol] = useState(doofAudio.getVolume());
-  const [playing, setPlaying] = useState(doofAudio.isPlaying());
 
   useEffect(() => {
     return doofAudio.subscribe((s) => {
       setMuted(s.muted);
       setVol(s.volume);
-      setPlaying(s.playing);
     });
   }, []);
 
@@ -1999,14 +2014,14 @@ function MusicControl() {
         type="button"
         onClick={() => doofAudio.toggleMute()}
         className={[
-          "rounded-lg border px-1.5 py-0.5 text-[9px] transition-all",
+          "rounded-lg border px-1.5 py-0.5 text-[12px] transition-all",
           muted
             ? "border-white/[0.05] bg-white/[0.015] text-zinc-600 hover:text-zinc-400"
             : "border-violet-400/20 bg-violet-500/[0.08] text-violet-300/90",
         ].join(" ")}
         aria-label={muted ? "Unmute ambient" : "Mute ambient"}
       >
-        {muted ? "MUTE" : playing ? "ON" : "OFF"}
+        {muted ? "MUTE" : "DOOF FM"}
       </button>
       <input
         type="range"
@@ -2040,13 +2055,13 @@ function TopBar({
   const cudaOn = hw?.cuda_available ?? false;
   return (
     <header className="flex h-[38px] shrink-0 items-center justify-between border-b border-white/[0.045] bg-[#000000]/96 px-4 backdrop-blur-xl">
-      <div className="text-[8px] font-medium uppercase tracking-[0.17em] text-zinc-700">
+      <div className="text-[12px] font-medium uppercase tracking-[0.17em] text-zinc-700">
         DOOF · {page}
       </div>
       <div className="flex items-center gap-1.5">
         <MusicControl />
         {err && (
-          <span className="max-w-[200px] truncate text-[8px] text-rose-400/70">{err}</span>
+          <span className="max-w-[200px] truncate text-[12px] text-rose-400/70">{err}</span>
         )}
         <StatusBadge tone={online ? "online" : "neutral"}>
           <StatusDot on={online} />
@@ -2066,7 +2081,7 @@ function TopBar({
    HARDWARE TAB
    ========================================================= */
 
-function HardwareTab({ hw, online }: { hw: HardwareInfo | null; online: boolean }) {
+function LegacyHardwareTab({ hw, online }: { hw: HardwareInfo | null; online: boolean }) {
   const gpus = hw?.cuda_devices ?? [];
   return (
     <div className="flex-1 overflow-y-auto p-4">
@@ -2089,7 +2104,7 @@ function HardwareTab({ hw, online }: { hw: HardwareInfo | null; online: boolean 
             <MetricCard label="CPU Cores" value={hw.cpu_count ?? "—"} />
             <MetricCard label="Torch" value={hw.torch_version ?? "—"} />
           </div>
-          <div className="mb-1.5 text-[8px] uppercase tracking-[0.15em] text-zinc-700">GPUs</div>
+          <div className="mb-1.5 text-[12px] uppercase tracking-[0.15em] text-zinc-700">GPUs</div>
           {gpus.length === 0 ? (
             <div className="rounded-xl border border-white/[0.04] px-4 py-6 text-center text-[10px] text-zinc-800">
               No CUDA GPU detected{hw.mps_available ? " · Apple MPS available" : ""} — training
@@ -2103,7 +2118,7 @@ function HardwareTab({ hw, online }: { hw: HardwareInfo | null; online: boolean 
                   className="flex items-center justify-between rounded-xl border border-white/[0.04] bg-white/[0.01] px-3 py-2"
                 >
                   <span className="text-[10px] text-zinc-300">{g.name}</span>
-                  <span className="text-[9px] tabular-nums text-violet-300/80">
+                  <span className="text-[12px] tabular-nums text-violet-300/80">
                     {g.total_memory_gb} GB VRAM
                   </span>
                 </div>
@@ -2122,6 +2137,7 @@ export default function App() {
   const [online, setOnline] = useState(false);
   const [hw, setHw] = useState<HardwareInfo | null>(null);
   const [err, setErr] = useState("");
+  const [booted, setBooted] = useState(false);
 
   // Chat state
   const [msgs, setMsgs] = useState<Msg[]>([]);
@@ -2141,6 +2157,8 @@ export default function App() {
     // --- Email verification link (?token=...&type=signup or #token=...) ---
     const vt =
       params.get("token") ||
+      params.get("token_hash") ||
+      hash.match(/[?&]token_hash=([^&]+)/)?.[1] ||
       hash.match(/[?&]token=([^&]+)/)?.[1] ||
       hash.match(/[#?]token=([^&]+)/)?.[1];
     const vtype = params.get("type") || "signup";
@@ -2150,7 +2168,7 @@ export default function App() {
       fetch(`${serverBase()}/api/auth/verify`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: decodeURIComponent(vt), type: vtype }),
+        body: JSON.stringify({ token: decodeURIComponent(vt), token_hash: decodeURIComponent(vt), type: vtype }),
       })
         .then((r) => r.json())
         .then((d: { token?: string; profile?: Profile; error?: string; status?: string }) => {
@@ -2261,7 +2279,7 @@ export default function App() {
 
   useEffect(() => {
     void ping();
-    const t = setInterval(() => void ping(), 10000);
+    const t = setInterval(() => void ping(), 15000);
     return () => clearInterval(t);
   }, [ping]);
 
@@ -2297,6 +2315,10 @@ export default function App() {
   }, [msgs]);
 
   // ---- Auth gate -------------------------------------------------------
+  if (!booted) {
+    return <Boot apiBase={serverBase()} onDone={() => setBooted(true)} />;
+  }
+
   if (verifyState === "verifying") {
     return (
       <div className="relative h-screen w-screen overflow-hidden bg-[#030304] text-zinc-300">
@@ -2307,7 +2329,7 @@ export default function App() {
               D
             </div>
             <div className="mt-3 text-[13px] font-semibold text-zinc-100">Verifying email…</div>
-            <div className="mt-1 text-[9px] text-zinc-500">Confirming with the DOOF brain.</div>
+            <div className="mt-1 text-[12px] text-zinc-500">Confirming with the DOOF brain.</div>
           </div>
         </div>
       </div>
@@ -2441,8 +2463,7 @@ export default function App() {
             )}
             {page === "memory" && <MemoryTab online={online} />}
             {page === "training" && <TrainingTab online={online} />}
-            {page === "network" && <NetworkTab online={online} />}
-            {page === "hardware" && <HardwareTab hw={hw} online={online} />}
+            {page === "status" && <StatusTab online={online} />}
             {page === "models" && <ModelsTab online={online} />}
             {page === "settings" && (
               <SettingsTab online={online} hw={hw} onLogout={() => void doLogout()} />
@@ -2453,3 +2474,5 @@ export default function App() {
     </div>
   );
 }
+
+export { LegacyNetworkTab, LegacyHardwareTab };

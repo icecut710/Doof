@@ -288,8 +288,16 @@ def _supabase_signin(
 
 
 def _supabase_cfg() -> tuple[str, str] | None:
-    url = os.environ.get("SUPABASE_URL", "").rstrip("/")
-    key = os.environ.get("SUPABASE_ANON_KEY", "")
+    url = (
+        os.environ.get("SUPABASE_URL")
+        or os.environ.get("DOOF_SUPABASE_URL")
+        or ""
+    ).rstrip("/")
+    key = (
+        os.environ.get("SUPABASE_ANON_KEY")
+        or os.environ.get("DOOF_SUPABASE_ANON_KEY")
+        or ""
+    )
     return (url, key) if url and key else None
 
 
@@ -361,12 +369,11 @@ def _supabase_signup(email: str, password: str) -> tuple[int, dict[str, Any]]:
         return 502, {"error": f"Supabase connection lost ({msg or e})"}
 
 
-def auth_verify(token: str) -> tuple[int, dict[str, Any]]:
+def auth_verify(token: str, token_type: str = "signup") -> tuple[int, dict[str, Any]]:
     """Complete a Supabase email-verification link clicked in the browser.
 
-    The confirmation email points at this app (see DOOF_VERIFY_REDIRECT).
-    The app hands the ``token`` here, Supabase validates/confirms the email,
-    and — only then — a real DOOF session is issued for the verified account.
+    Handles both the older ``token`` body and the current ``token_hash``
+    query used by Supabase confirmation emails.
     """
     cfg = _supabase_cfg()
     if not cfg:
@@ -378,9 +385,14 @@ def auth_verify(token: str) -> tuple[int, dict[str, Any]]:
     try:
         from urllib.request import Request, urlopen
 
+        # Prefer token_hash (current Supabase email templates).
+        payload: dict[str, Any] = {"type": token_type or "signup"}
+        if len(token) > 40 and token.count("-") == 0:
+            payload["token_hash"] = token
+        payload["token"] = token
         req = Request(
             f"{url}/auth/v1/verify",
-            data=json.dumps({"type": "signup", "token": token}).encode(),
+            data=json.dumps(payload).encode(),
             headers={"apikey": key, "Content-Type": "application/json"},
             method="POST",
         )
@@ -393,9 +405,16 @@ def auth_verify(token: str) -> tuple[int, dict[str, Any]]:
             msg = json.loads(body().decode()).get("msg", "") if callable(body) else ""
         except Exception:
             pass
+        # Implicit-flow confirmation often lands as an access_token instead.
+        if "access_token" in token or token_type == "oauth":
+            return auth_oauth(token)
         if "invalid" in (msg or "").lower() or "expired" in (msg or "").lower():
-            return 400, {"error": "This verification link is invalid or has expired."}
-        return 502, {"error": f"Supabase connection lost ({msg or e})"}
+            return 400, {
+                "error": "This verification link is invalid or has expired.",
+                "code": "verify_invalid",
+            }
+        from doof.errors import public_error
+        return 502, public_error(e)
 
     user = data.get("user") or {}
     email = (user.get("email") or "").lower()
@@ -428,14 +447,60 @@ def auth_verify(token: str) -> tuple[int, dict[str, Any]]:
 
 def auth_config() -> dict[str, Any]:
     cfg = _supabase_cfg()
-    if cfg:
+    redirect = _verify_redirect()
+    if not cfg:
         return {
-            "provider": "supabase",
-            "oauth": True,
-            "email_verification": True,
-            "authorize_url": f"{cfg[0]}/auth/v1/authorize?provider=google&response_type=token",
+            "provider": "local",
+            "oauth": False,
+            "google": "not_configured",
+            "email_verification": False,
+            "mode": "local",
+            "redirect_hint": redirect,
         }
-    return {"provider": "local", "oauth": False, "email_verification": False}
+    url, key = cfg
+    google_state = "available"
+    try:
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            f"{url}/auth/v1/settings",
+            headers={"apikey": key},
+            method="GET",
+        )
+        with urlopen(req, timeout=4) as resp:
+            settings = json.loads(resp.read())
+        providers = (
+            (settings.get("external") or {})
+            if isinstance(settings, dict)
+            else {}
+        )
+        google_on = False
+        if isinstance(providers, dict):
+            g = providers.get("google")
+            if g is True or (isinstance(g, dict) and g.get("enabled", True)):
+                google_on = True
+            # Some payloads list enabled names.
+            names = providers.get("external") or providers.get("providers") or []
+            if isinstance(names, list) and "google" in names:
+                google_on = True
+        if not google_on and not providers:
+            # Settings reachable but shape unknown — still show the button.
+            google_on = True
+        google_state = "available" if google_on else "not_configured"
+    except Exception:
+        google_state = "temporarily_unavailable"
+    return {
+        "provider": "supabase",
+        "oauth": google_state == "available",
+        "google": google_state,
+        "email_verification": True,
+        "mode": "connected",
+        "redirect_hint": redirect,
+        "authorize_url": (
+            f"{url}/auth/v1/authorize?provider=google&response_type=token"
+            f"&redirect_to={redirect}"
+        ),
+    }
 
 
 def auth_resend(email: str) -> tuple[int, dict[str, Any]]:
@@ -611,13 +676,21 @@ def _cors(h: BaseHTTPRequestHandler) -> None:
 
 
 def _json(h: BaseHTTPRequestHandler, code: int, data: Any) -> None:
-    b = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    b = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
     h.send_response(code)
     h.send_header("Content-Type", "application/json; charset=utf-8")
     h.send_header("Content-Length", str(len(b)))
     _cors(h)
     h.end_headers()
     h.wfile.write(b)
+
+
+def _json_err(h: BaseHTTPRequestHandler, err: BaseException, code: int = 500) -> None:
+    from doof.errors import public_error
+
+    payload = public_error(err)
+    print(f"[api] {payload.get('technical')}")
+    _json(h, code, payload)
 
 
 def _body(h: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -701,6 +774,10 @@ def _find_ckpt(pref: str | None = None) -> Path:
 
 def get_inf(ckpt: str | None = None):
     global _inf, _loaded
+    from doof.runtime import import_torch, torch_error
+
+    if import_torch() is None:
+        raise RuntimeError(torch_error() or "torch unavailable")
     with _lock:
         path = str(_find_ckpt(ckpt))
         if _inf is not None and _loaded == path:
@@ -712,49 +789,24 @@ def get_inf(ckpt: str | None = None):
 
 
 def hardware() -> dict[str, Any]:
-    info: dict[str, Any] = {
-        "platform": platform.system(),
-        "python": platform.python_version(),
-        "machine": platform.machine(),
-        "cuda_available": False,
-        "cuda_device_count": 0,
-        "cuda_devices": [],
-        "cuda_version": None,
-        "mps_available": False,
-        "device": "cpu",
-        "torch_version": None,
-        "cpu_count": None,
-    }
-    try:
-        import os
-        info["cpu_count"] = os.cpu_count()
-        import torch
-        info["torch_version"] = torch.__version__
-        info["cuda_available"] = torch.cuda.is_available()
-        if info["cuda_available"]:
-            info["device"] = "cuda"
-            info["cuda_device_count"] = torch.cuda.device_count()
-            info["cuda_version"] = getattr(torch.version, "cuda", None)
-            for i in range(info["cuda_device_count"]):
-                p = torch.cuda.get_device_properties(i)
-                info["cuda_devices"].append(
-                    {
-                        "index": i,
-                        "name": p.name,
-                        "total_memory_gb": round(p.total_memory / (1024**3), 2),
-                    }
-                )
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            info["mps_available"] = True
-            info["device"] = "mps"
-    except Exception as e:
-        info["error"] = str(e)
-    return info
+    from doof.runtime import probe_hardware
+    return probe_hardware()
 
 
 def model_info() -> dict[str, Any]:
+    from doof.runtime import torch_available, torch_error
+
+    if _inf is None:
+        return {
+            "loaded": False,
+            "lazy": True,
+            "torch_available": torch_available(),
+            "torch_error": torch_error(),
+            "architecture": "decoder-only Transformer",
+            "checkpoint": _loaded,
+        }
     try:
-        inf = get_inf()
+        inf = _inf
         n = sum(p.numel() for p in inf.model.parameters())
         return {
             "loaded": True,
@@ -768,9 +820,12 @@ def model_info() -> dict[str, Any]:
             "device": str(inf.device),
             "checkpoint": _loaded,
             "architecture": "decoder-only Transformer",
+            "torch_available": True,
         }
     except Exception as e:
-        return {"loaded": False, "error": str(e)}
+        from doof.errors import public_error
+        err = public_error(e)
+        return {"loaded": False, "error": err["title"], "technical": err["technical"]}
 
 
 def list_ckpts() -> list[dict[str, Any]]:
@@ -1177,6 +1232,23 @@ def _machine_id() -> str:
     return mid
 
 
+def _guess_lan_ip() -> str:
+    """Best-effort LAN address for same-wifi peers. Never assume it works across NAT."""
+    try:
+        import socket
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.2)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
 def get_nodes_with_local() -> list[dict[str, Any]]:
     """Return all nodes, auto-updating the local node entry from hardware()."""
     global _local_node_id
@@ -1208,8 +1280,14 @@ def get_nodes_with_local() -> list[dict[str, Any]]:
         gpu_name = "Apple MPS"
 
     now_ts = time.time()
+    from doof.runtime import capabilities_from_hardware
+    from doof.compute.pool import _settings as _compute_settings, current_job_count
+
+    consent = _compute_settings()
+    lan_url = os.environ.get("DOOF_LAN_URL") or f"http://{_guess_lan_ip()}:8765"
     local_data: dict[str, Any] = {
         "id": local_id,
+        "machine_id": local_id,
         "name": host,
         "gpu": gpu_name,
         "vram_gb": vram_gb,
@@ -1221,6 +1299,20 @@ def get_nodes_with_local() -> list[dict[str, Any]]:
         "last_seen": now_ts,
         "is_local": True,
         "training_active": _train.get("running", False),
+        "capabilities": capabilities_from_hardware(hw),
+        "cpu_count": hw.get("cpu_count"),
+        "ram_gb": hw.get("ram_gb"),
+        "cpu_load": None,
+        "job_count": current_job_count(),
+        "max_jobs": consent.get("max_jobs", 1),
+        "accepting_jobs": bool(consent.get("accepting_jobs")),
+        "accept_cpu": bool(consent.get("accept_cpu", True)),
+        "accept_gpu": bool(consent.get("accept_gpu", True)),
+        "pause_on_battery": bool(consent.get("pause_on_battery", True)),
+        "pause_when_gaming": bool(consent.get("pause_when_gaming", True)),
+        "idle_only": bool(consent.get("idle_only", False)),
+        "lan_url": lan_url,
+        "reachable": True,
     }
 
     if local_node:
@@ -1628,6 +1720,135 @@ def delete_approved_example_api(example_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+_boot: dict[str, Any] = {
+    "phase": "runtime",
+    "ready": False,
+    "failed": False,
+    "message": "Warming up the shawarma machine…",
+}
+
+
+def boot_state() -> dict[str, Any]:
+    from doof.personality import boot_copy
+
+    label, detail = boot_copy(_boot.get("phase") or "runtime")
+    return {
+        **_boot,
+        "label": label,
+        "detail": detail,
+    }
+
+
+def status_snapshot() -> dict[str, Any]:
+    """Honest combined status for the Status tab. Never fakes compute."""
+    from doof.personality import pick, health_kind, node_nickname
+    from doof.runtime import torch_available, torch_error, is_low_end
+    from doof.compute.pool import _settings as cs, current_job_count
+    from doof.compute.scheduler import node_state, is_stale
+    from doof.cloud import cloud_status
+
+    hw = hardware()
+    nodes = get_nodes_with_local()
+    online_nodes = [n for n in nodes if n.get("status") == "online" and not is_stale(n)]
+    consent = cs()
+    cloud = cloud_status()
+    sb = _supabase_cfg()
+    mode = "connected" if sb and cloud.get("connected") else ("local" if not sb else "degraded")
+    if not sb:
+        mode = "local"
+    elif cloud.get("connected"):
+        mode = "connected"
+    else:
+        mode = "offline"
+
+    problems: list[dict[str, Any]] = []
+    if not torch_available():
+        problems.append({
+            "title": "The local brain failed to start.",
+            "body": "DOOF switched to its backup brain.",
+            "technical": torch_error(),
+            "kind": "ai_down",
+        })
+    if sb and not cloud.get("connected"):
+        problems.append({
+            "title": pick("cloud_offline")[0],
+            "body": str(cloud.get("message") or "Cloud unreachable"),
+            "technical": cloud.get("message"),
+            "kind": "cloud_offline",
+        })
+
+    kind = health_kind(
+        online=True,
+        degraded=bool(problems),
+        busy=_train.get("running") or current_job_count() > 0,
+    )
+    label, detail = pick(kind)
+    accepting = [n for n in online_nodes if n.get("accepting_jobs")]
+    pool_label, pool_detail = pick("network" if accepting else "network_empty")
+
+    decorated = []
+    for n in nodes:
+        st = node_state(n)
+        decorated.append({
+            **n,
+            "state": st,
+            "nickname": node_nickname(str(n.get("name") or "node"), n.get("gpu"), bool(n.get("is_local"))),
+            "stale": is_stale(n),
+        })
+
+    auth = auth_config()
+    return {
+        "ok": True,
+        "version": "0.2.1",
+        "mode": mode,
+        "health": {"kind": kind, "label": label, "detail": detail},
+        "brain": {
+            "torch_available": torch_available(),
+            "torch_error": torch_error(),
+            "loaded": _inf is not None,
+            "provider": "local_model" if _inf is not None else "memory",
+            "cloud_fallback": bool(os.environ.get("XAI_API_KEY") or os.environ.get("DOOF_XAI_API_KEY")),
+            "low_end": is_low_end(),
+            "device": hw.get("device"),
+            "label": pick("ai" if torch_available() else "ai_fallback")[0],
+            "detail": pick("ai" if torch_available() else "ai_fallback")[1],
+        },
+        "database": {
+            "local": True,
+            "supabase_configured": bool(sb),
+            "supabase_connected": bool(cloud.get("connected")),
+            "mode": mode,
+            "label": pick("cloud_connected" if mode == "connected" else "cloud_offline")[0],
+            "detail": pick("cloud_connected" if mode == "connected" else "cloud_offline")[1],
+        },
+        "network": {
+            "nodes": decorated,
+            "online": len(online_nodes),
+            "accepting": len(accepting),
+            "label": pool_label,
+            "detail": pool_detail,
+            "honest": "Job-level compute sharing. One job runs on one node. Models are not split across PCs.",
+        },
+        "compute": {
+            "contribute": consent,
+            "job_count": current_job_count(),
+            "local_id": _machine_id(),
+        },
+        "hardware": hw,
+        "music": {
+            "label": pick("music")[0],
+            "detail": pick("music")[1],
+        },
+        "auth": {
+            "provider": auth.get("provider"),
+            "google": auth.get("google"),
+            "email_verification": auth.get("email_verification"),
+        },
+        "problems": problems,
+        "training_running": bool(_train.get("running")),
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[api] {args[0]}")
@@ -1642,7 +1863,20 @@ class Handler(BaseHTTPRequestHandler):
         try:
             # Health
             if path in ("/", "/api/health"):
-                _json(self, 200, {"ok": True, "service": "doof", "version": "0.2.0"})
+                from doof.personality import pick
+                from doof.runtime import torch_available, is_low_end
+
+                label, detail = pick("healthy" if True else "offline")
+                _json(self, 200, {
+                    "ok": True,
+                    "service": "doof",
+                    "version": "0.2.1",
+                    "label": label,
+                    "detail": detail,
+                    "torch": torch_available(),
+                    "low_end": is_low_end(),
+                    "mode": "connected" if _supabase_cfg() else "local",
+                })
 
             # Hardware
             elif path == "/api/hardware":
@@ -1777,6 +2011,16 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/auth/config":
                 _json(self, 200, auth_config())
 
+            elif path == "/api/status":
+                _json(self, 200, status_snapshot())
+
+            elif path == "/api/compute/settings":
+                from doof.compute.pool import _settings as cs
+                _json(self, 200, cs())
+
+            elif path == "/api/boot":
+                _json(self, 200, boot_state())
+
             # Scheduler
             elif path == "/api/scheduler":
                 from doof.intelligence.scheduler import get_scheduler
@@ -1786,7 +2030,7 @@ class Handler(BaseHTTPRequestHandler):
                 _json(self, 404, {"error": "not found"})
 
         except Exception as e:
-            _json(self, 500, {"error": str(e), "trace": traceback.format_exc()})
+            _json_err(self, e, 500)
 
     def do_POST(self) -> None:
         global _inf, _loaded
@@ -1797,7 +2041,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/generate":
                 prompt = (body.get("prompt") or "").strip()
                 if not prompt:
-                    _json(self, 400, {"error": "prompt required"})
+                    _json(self, 400, {"error": "Say something first.", "title": "Empty message"})
                     return
 
                 with _lock:
@@ -1805,39 +2049,56 @@ class Handler(BaseHTTPRequestHandler):
                     mx = int(body.get("max_new_tokens", _settings["max_new_tokens"]))
                     tk = int(body.get("top_k", _settings.get("top_k", 50)))
 
-                # RAG retrieval
-                memories_used: list[dict] = []
-                try:
-                    from doof.intelligence.rag import retrieve_memories, build_context
-                    memories_used = retrieve_memories(prompt, top_k=5)
-                    if memories_used:
-                        context = build_context(memories_used)
-                        augmented_prompt = f"{context}\n\nUser: {prompt}\nDOOF:"
-                        # Increment usage on retrieved memories
-                        store = _get_store()
-                        for mem in memories_used:
-                            store.increment_usage(mem["id"])
-                    else:
-                        augmented_prompt = prompt
-                except Exception:
-                    augmented_prompt = prompt
-
-                inf = get_inf()
                 t0 = time.time()
-                text = inf.generate(augmented_prompt, max_new_tokens=mx, temperature=temp, top_k=tk)
-                if text.startswith(augmented_prompt):
-                    text = text[len(augmented_prompt):].lstrip()
-                if _looks_weak(text):
-                    text = _answer_from_memory(prompt, memories_used)
+                try:
+                    from doof.compute.pool import dispatch_inference
 
+                    nodes = get_nodes_with_local()
+                    result = dispatch_inference(
+                        prompt,
+                        temperature=temp,
+                        max_new_tokens=mx,
+                        top_k=tk,
+                        nodes=nodes,
+                        local_id=_machine_id(),
+                        token=_bearer_token(self),
+                    )
+                except Exception as e:
+                    from doof.errors import public_error
+                    from doof.compute.pool import execute_local
+
+                    err = public_error(e, fallback_used="memory")
+                    print(f"[api] generate failed: {err.get('technical')}")
+                    try:
+                        result = execute_local("inference", {"prompt": prompt})
+                        result["notice"] = {
+                            "title": err["title"],
+                            "detail": err["body"],
+                        }
+                    except Exception:
+                        _json(self, 200, {
+                            "text": err["body"],
+                            "prompt": prompt,
+                            "provider": "none",
+                            "notice": err,
+                            "elapsed_ms": int((time.time() - t0) * 1000),
+                            "memories_used": [],
+                        })
+                        return
+
+                text = (result.get("text") or "").strip()
                 _json(
                     self,
                     200,
                     {
-                        "text": text,
+                        "text": text or "I heard you. The grill is quiet — try again in a moment.",
                         "prompt": prompt,
                         "elapsed_ms": int((time.time() - t0) * 1000),
-                        "memories_used": memories_used,
+                        "memories_used": result.get("memories_used") or [],
+                        "provider": result.get("provider") or "local",
+                        "routed_to": result.get("routed_to"),
+                        "notice": result.get("notice"),
+                        "pool": result.get("pool"),
                     },
                 )
 
@@ -1855,7 +2116,8 @@ class Handler(BaseHTTPRequestHandler):
                 _json(self, code, payload)
 
             elif path == "/api/auth/verify":
-                code, payload = auth_verify((body.get("token") or "").strip())
+                token = (body.get("token") or body.get("token_hash") or body.get("access_token") or "").strip()
+                code, payload = auth_verify(token, token_type=(body.get("type") or "signup"))
                 _json(self, code, payload)
 
             elif path == "/api/auth/oauth":
@@ -1988,44 +2250,35 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     _json(self, 404, {"error": "feedback not found"})
 
-            # Node register
+            # Node register — always the persistent machine id, never "local"
             elif path == "/api/nodes/register":
-                name = (body.get("name") or platform.node() or "Unknown").strip()
                 db = _db()
-                nodes = _load_nodes()
+                mid = _machine_id()
+                hw = hardware()
+                name = (body.get("name") or platform.node() or "Unknown").strip()
                 now_ts = time.time()
-                existing = next((n for n in nodes if n.get("name") == name), None)
-
                 node_data: dict[str, Any] = {
+                    "id": mid,
+                    "machine_id": mid,
                     "name": name,
-                    "gpu": body.get("gpu", "Unknown GPU"),
-                    "vram_gb": float(body.get("vram_gb", 0)),
-                    "device": body.get("device", "cpu"),
-                    "cuda_available": body.get("cuda_available", False),
-                    "platform": body.get("platform", platform.system()),
-                    "torch_version": body.get("torch_version"),
+                    "gpu": body.get("gpu") or hw.get("cuda_devices", [{}])[0].get("name") if hw.get("cuda_devices") else body.get("gpu", "CPU"),
+                    "vram_gb": float(body.get("vram_gb") or 0),
+                    "device": body.get("device") or hw.get("device") or "cpu",
+                    "cuda_available": body.get("cuda_available", hw.get("cuda_available", False)),
+                    "platform": body.get("platform") or hw.get("platform") or platform.system(),
+                    "torch_version": body.get("torch_version") or hw.get("torch_version"),
                     "status": "online",
                     "last_seen": now_ts,
-                    "is_local": body.get("is_local", False),
+                    "is_local": True,
                     "training_active": body.get("training_active", False),
                 }
-
-                if existing:
-                    node_data["id"] = existing["id"]
-                else:
-                    node_data["id"] = str(uuid.uuid4())
                 try:
                     saved = db.upsert_node(node_data)
-                    saved.setdefault("id", node_data["id"])
-                    saved.setdefault("registered_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+                    saved.setdefault("id", mid)
                 except Exception:
                     saved = node_data
-
-                # Track local node id
-                if saved.get("is_local"):
-                    global _local_node_id
-                    _local_node_id = saved["id"]
-
+                global _local_node_id
+                _local_node_id = mid
                 _json(self, 201, {"ok": True, "node": saved})
 
             # Node heartbeat
@@ -2143,11 +2396,57 @@ class Handler(BaseHTTPRequestHandler):
                     SETT.write_text(json.dumps(_settings, indent=2, ensure_ascii=False), encoding="utf-8")
                     _json(self, 200, dict(_settings))
 
+            elif path == "/api/compute/settings":
+                from doof.compute.pool import save_settings
+                saved = save_settings(body)
+                try:
+                    get_nodes_with_local()
+                except Exception:
+                    pass
+                _json(self, 200, {"ok": True, "settings": saved})
+
+            elif path == "/api/compute/execute":
+                if not _profile_from_token(_bearer_token(self)):
+                    if self.client_address[0] not in ("127.0.0.1", "::1"):
+                        _json(self, 401, {"error": "Sign in to send work to this grill."})
+                        return
+                job_type = (body.get("type") or "inference").strip()
+                try:
+                    from doof.compute.pool import execute_local
+                    result = execute_local(job_type, body.get("payload") or body)
+                    _json(self, 200, result)
+                except Exception as e:
+                    _json_err(self, e, 400)
+
+            elif path == "/api/compute/jobs":
+                from doof.compute.jobs import validate_payload
+                job_type = (body.get("type") or "inference").strip()
+                try:
+                    payload = validate_payload(job_type, body.get("payload") or body)
+                except Exception as e:
+                    _json_err(self, e, 400)
+                    return
+                if job_type == "inference":
+                    from doof.compute.pool import dispatch_inference
+                    result = dispatch_inference(
+                        payload["prompt"],
+                        temperature=payload.get("temperature", 0.7),
+                        max_new_tokens=payload.get("max_new_tokens", 80),
+                        top_k=payload.get("top_k", 50),
+                        nodes=get_nodes_with_local(),
+                        local_id=_machine_id(),
+                        token=_bearer_token(self),
+                    )
+                    _json(self, 200, result)
+                else:
+                    from doof.compute.pool import execute_local
+                    _json(self, 200, execute_local(job_type, payload))
+
             else:
                 _json(self, 404, {"error": "not found"})
 
         except Exception as e:
-            _json(self, 500, {"error": str(e), "trace": traceback.format_exc()})
+            _json_err(self, e, 500)
 
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
@@ -2237,8 +2536,10 @@ def _start_heartbeat() -> None:
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
+    global _boot
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _boot.update({"phase": "runtime", "ready": False})
     _seed_train_txt()
 
     if SETT.exists():
@@ -2247,14 +2548,38 @@ def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
         except Exception:
             pass
 
-    # Register local node on startup
-    get_nodes_with_local()
+    _boot["phase"] = "database"
+    try:
+        _db()
+    except Exception as e:
+        print(f"[api] database init: {e}")
 
-    # Start background heartbeat
+    _boot["phase"] = "cloud"
+    try:
+        from doof.cloud import cloud_status
+        cloud_status()
+    except Exception:
+        pass
+
+    _boot["phase"] = "ai"
+    # Do NOT load the model here. Chat lazy-loads. Low-end machines stay usable.
+
+    _boot["phase"] = "network"
+    try:
+        get_nodes_with_local()
+    except Exception as e:
+        print(f"[api] node register: {e}")
+
     _start_heartbeat()
+    try:
+        from doof.compute.pool import start_worker_loop
+        start_worker_loop(_machine_id)
+    except Exception as e:
+        print(f"[api] compute worker: {e}")
 
+    _boot.update({"phase": "ready", "ready": True})
     s = ThreadingHTTPServer((host, port), Handler)
-    print(f"DOOF API v0.2 listening on http://{host}:{port}")
+    print(f"DOOF API v0.2.1 listening on http://{host}:{port}")
     try:
         s.serve_forever()
     except KeyboardInterrupt:

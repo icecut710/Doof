@@ -278,9 +278,31 @@ def main() -> int:
     icon_path = ROOT / "assets" / "doof_icon.ico"
     if not icon_path.is_file():
         icon_path = ROOT / "assets" / "doof.ico"
+    splash = None
     if icon_path.is_file():
-        from PySide6.QtGui import QIcon
+        from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
+        from PySide6.QtWidgets import QSplashScreen
         app.setWindowIcon(QIcon(str(icon_path)))
+        pix = QPixmap(520, 340)
+        pix.fill(QColor("#050506"))
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QColor("#c4b5fd"))
+        font = QFont("Segoe UI", 28, QFont.Weight.DemiBold)
+        p.setFont(font)
+        p.drawText(pix.rect().adjusted(0, -24, 0, 0), int(Qt.AlignmentFlag.AlignCenter), "D")
+        p.setPen(QColor("#a1a1aa"))
+        p.setFont(QFont("Segoe UI", 10))
+        p.drawText(pix.rect().adjusted(0, 80, 0, 0), int(Qt.AlignmentFlag.AlignCenter), "Warming up the shawarma machine…")
+        p.end()
+        splash = QSplashScreen(pix)
+        splash.show()
+        splash.showMessage(
+            "Checking the grill…",
+            int(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter),
+            QColor("#a1a1aa"),
+        )
+        app.processEvents()
 
     if not build_frontend():
         QMessageBox.critical(
@@ -312,6 +334,8 @@ def main() -> int:
 
     window = DOOFWindow(ui_origin)
     window.show()
+    if splash is not None:
+        splash.finish(window)
     return app.exec()
 
 

@@ -14,8 +14,8 @@ except Exception:
 
 def _load_config() -> dict[str, Any]:
     cfg: dict[str, Any] = {
-        "url": os.environ.get("DOOF_SUPABASE_URL", ""),
-        "anon_key": os.environ.get("DOOF_SUPABASE_ANON_KEY", ""),
+        "url": os.environ.get("DOOF_SUPABASE_URL") or os.environ.get("SUPABASE_URL") or "",
+        "anon_key": os.environ.get("DOOF_SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_ANON_KEY") or "",
         "enabled": False,
     }
     if CONFIG_PATH.exists():

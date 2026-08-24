@@ -130,7 +130,10 @@ class FreshInstallTests(unittest.TestCase):
     """Fresh install must never surface 'No checkpoint found'."""
 
     def test_bootstrap_creates_valid_checkpoint(self):
-        import torch
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch not installed in this environment")
 
         # Isolated "fresh install": empty checkpoint dir
         import tempfile

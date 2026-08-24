@@ -4,6 +4,7 @@ import { getServer, setServer, storeToken, type Profile } from "./auth";
 type AuthConfig = {
   provider: "local" | "supabase";
   oauth: boolean;
+  google?: "available" | "temporarily_unavailable" | "not_configured";
   email_verification: boolean;
   authorize_url?: string;
   redirect_hint?: string;
@@ -66,13 +67,16 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
     onLogin(data.profile);
   };
 
+  const googleState = cfg?.google || (cfg?.oauth ? "available" : "not_configured");
+  const googleReady = googleState === "available" && Boolean(cfg?.authorize_url);
+
   const google = () => {
-    if (!cfg?.authorize_url || googleBusy) return;
+    if (!googleReady || googleBusy) return;
     setGoogleBusy(true);
     setErr("");
     const origin = `${window.location.origin}${window.location.pathname || "/"}`;
-    const redirect = (cfg.redirect_hint || origin).replace(/\/?$/, "/");
-    const base = cfg.authorize_url;
+    const redirect = (cfg?.redirect_hint || origin).replace(/\/?$/, "/");
+    const base = cfg?.authorize_url || "";
     const url = base.includes("redirect_to=")
       ? base
       : `${base}${base.includes("?") ? "&" : "?"}redirect_to=${encodeURIComponent(redirect)}`;
@@ -141,13 +145,13 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
             ✉
           </div>
           <h2 className="mt-3 text-[15px] font-semibold text-zinc-100">Check your email</h2>
-          <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+          <p className="mt-2 text-[13px] leading-relaxed text-zinc-500">
             We sent a confirmation link to{" "}
             <span className="text-zinc-300">{email || "your inbox"}</span>. Open it on this
             machine so DOOF can finish signing you in.
           </p>
           {err && (
-            <div className="mt-3 rounded-lg border border-rose-500/15 bg-rose-500/[0.06] px-3 py-1.5 text-[9px] text-rose-300/90">
+            <div className="mt-3 rounded-lg border border-rose-500/15 bg-rose-500/[0.06] px-3 py-1.5 text-[12px] text-rose-300/90">
               {err}
             </div>
           )}
@@ -155,16 +159,16 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
             type="button"
             disabled={busy}
             onClick={resend}
-            className="mt-4 w-full rounded-xl border border-violet-400/20 bg-violet-600/80 py-2 text-[11px] font-medium text-white transition hover:bg-violet-500 disabled:opacity-40"
+            className="mt-4 w-full rounded-xl border border-violet-400/20 bg-violet-600/80 py-2.5 text-[13px] font-medium text-white transition hover:bg-violet-500 disabled:opacity-40"
           >
             {busy ? "Sending…" : "Resend confirmation email"}
           </button>
-          {cfg?.oauth && (
+          {googleReady && (
             <button
               type="button"
               disabled={googleBusy}
               onClick={google}
-              className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white py-2 text-[11px] font-medium text-zinc-800 transition hover:bg-zinc-100 disabled:opacity-50"
+              className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white py-2 text-[13px] font-medium text-zinc-800 transition hover:bg-zinc-100 disabled:opacity-50"
             >
               <GoogleIcon />
               {googleBusy ? "Redirecting…" : "Continue with Google instead"}
@@ -177,7 +181,7 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
               setMode("login");
               setErr("");
             }}
-            className="mt-2 w-full rounded-xl border border-white/[0.06] py-2 text-[10px] text-zinc-400 transition hover:bg-white/[0.03]"
+            className="mt-2 w-full rounded-xl border border-white/[0.06] py-2 text-[13px] text-zinc-400 transition hover:bg-white/[0.03]"
           >
             Back to sign in
           </button>
@@ -189,7 +193,7 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
   const input =
     "w-full rounded-xl border border-white/[0.07] bg-black/60 px-3 py-2 text-[12px] text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-violet-400/30 focus:bg-violet-500/[0.03]";
   const btn =
-    "w-full rounded-xl border border-violet-400/20 bg-violet-600/80 py-2 text-[11px] font-medium text-white transition hover:bg-violet-500 disabled:opacity-40";
+    "w-full rounded-xl border border-violet-400/20 bg-violet-600/80 py-2 text-[13px] font-medium text-white transition hover:bg-violet-500 disabled:opacity-40";
 
   return (
     <div className="flex min-h-screen items-center justify-center">
@@ -200,7 +204,7 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
               D
             </div>
             <h1 className="mt-3 text-[18px] font-semibold tracking-tight text-zinc-100">DOOF</h1>
-            <p className="mt-0.5 text-[9px] uppercase tracking-[0.22em] text-zinc-600">
+            <p className="mt-0.5 text-[12px] uppercase tracking-[0.22em] text-zinc-600">
               Private intelligence OS
             </p>
           </div>
@@ -230,7 +234,7 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
               <button
                 type="button"
                 onClick={() => setShowPw(!showPw)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] text-zinc-600 hover:text-zinc-300"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-[12px] text-zinc-600 hover:text-zinc-300"
               >
                 {showPw ? "HIDE" : "SHOW"}
               </button>
@@ -249,7 +253,7 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
             )}
 
             {mode === "signup" && (
-              <p className="px-1 text-[8px] leading-relaxed text-zinc-600">
+              <p className="px-1 text-[12px] leading-relaxed text-zinc-600">
                 First account becomes <span className="text-violet-300">Owner</span>. Friends join
                 as Trusted Users — one shared brain.
               </p>
@@ -268,15 +272,15 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
               <div
                 className={
                   err.includes("resent")
-                    ? "rounded-lg border border-emerald-500/15 bg-emerald-500/[0.05] px-3 py-1.5 text-[9px] text-emerald-300/90"
-                    : "rounded-lg border border-rose-500/15 bg-rose-500/[0.06] px-3 py-1.5 text-[9px] text-rose-300/90"
+                    ? "rounded-lg border border-emerald-500/15 bg-emerald-500/[0.05] px-3 py-1.5 text-[12px] text-emerald-300/90"
+                    : "rounded-lg border border-rose-500/15 bg-rose-500/[0.06] px-3 py-1.5 text-[12px] text-rose-300/90"
                 }
               >
                 {err}
               </div>
             )}
 
-            <label className="flex cursor-pointer items-center gap-1.5 px-1 pt-0.5 text-[9px] text-zinc-500">
+            <label className="flex cursor-pointer items-center gap-1.5 px-1 pt-0.5 text-[12px] text-zinc-500">
               <input
                 type="checkbox"
                 checked={remember}
@@ -291,23 +295,38 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
             </button>
           </form>
 
-          {cfg?.oauth && (
+          {googleReady && (
             <>
               <div className="my-3 flex items-center gap-2">
                 <div className="h-px flex-1 bg-white/[0.06]" />
-                <span className="text-[8px] uppercase tracking-widest text-zinc-700">or</span>
+                <span className="text-[13px] uppercase tracking-widest text-zinc-600">or</span>
                 <div className="h-px flex-1 bg-white/[0.06]" />
               </div>
               <button
                 type="button"
                 onClick={google}
                 disabled={googleBusy || busy}
-                className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white py-2 text-[11px] font-medium text-zinc-800 transition hover:bg-zinc-100 disabled:opacity-50"
+                className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white py-2.5 text-[13px] font-medium text-zinc-800 transition hover:bg-zinc-100 disabled:opacity-50"
               >
                 <GoogleIcon />
                 {googleBusy ? "Redirecting to Google…" : "Continue with Google"}
               </button>
             </>
+          )}
+          {googleState === "temporarily_unavailable" && (
+            <p className="mt-3 text-center text-[12px] leading-relaxed text-zinc-500">
+              Google took a smoke break. It is configured, but not answering right now. Use email, or try Google again in a minute.
+            </p>
+          )}
+          {googleState === "not_configured" && cfg?.provider === "supabase" && (
+            <p className="mt-3 text-center text-[12px] leading-relaxed text-zinc-600">
+              Google sign-in is not configured on this brain. Email still works.
+            </p>
+          )}
+          {cfg?.provider === "local" && (
+            <p className="mt-3 text-center text-[12px] leading-relaxed text-zinc-600">
+              Local kitchen — accounts stay on this machine until Supabase is configured.
+            </p>
           )}
 
           <div className="mt-4 flex items-center justify-between border-t border-white/[0.04] pt-3">
@@ -317,21 +336,21 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
                 setMode(mode === "login" ? "signup" : "login");
                 setErr("");
               }}
-              className="text-[9px] text-zinc-500 transition hover:text-violet-300"
+              className="text-[12px] text-zinc-500 transition hover:text-violet-300"
             >
               {mode === "login" ? "Create account" : "Have an account? Sign in"}
             </button>
             <button
               type="button"
               onClick={() => setShowServer(!showServer)}
-              className="text-[9px] text-zinc-500 transition hover:text-violet-300"
+              className="text-[12px] text-zinc-500 transition hover:text-violet-300"
             >
               Join existing brain
             </button>
           </div>
         </div>
 
-        <p className="mt-3 text-center text-[8px] tracking-wide text-zinc-700">
+        <p className="mt-3 text-center text-[12px] tracking-wide text-zinc-700">
           v0.2α · local-first · shared brain
         </p>
       </div>
