@@ -37,3 +37,32 @@ html, body, #root {
 
 .doof-fade { animation: doof-fade-in 0.28s ease-out both; }
 .doof-pulse { animation: doof-pulse 2.2s ease-in-out infinite; }
+
+/* ---- Beat-reactive hooks (CSS only — analyser writes the vars) ---- */
+.doof-beat-glow {
+  opacity: calc(0.065 + var(--doof-beat) * 0.07);
+  transform: scale(calc(1 + var(--doof-beat) * 0.04));
+  transition: opacity 0.08s linear, transform 0.08s linear;
+  will-change: opacity, transform;
+}
+
+.doof-beat-aura {
+  opacity: calc(0.018 + var(--doof-beat) * 0.025);
+  transition: opacity 0.1s linear;
+}
+
+.doof-nav-active-beat {
+  box-shadow:
+    inset 0 0 0 1px rgba(139, 92, 246, calc(0.18 + var(--doof-beat) * 0.12)),
+    0 0 18px rgba(139, 92, 246, calc(0.1 + var(--doof-beat) * 0.14));
+}
+
+.doof-logo-beat {
+  box-shadow: 0 0 calc(12px + var(--doof-beat) * 10px) rgba(124, 58, 237, calc(0.1 + var(--doof-beat) * 0.18));
+  border-color: rgba(167, 139, 250, calc(0.2 + var(--doof-beat) * 0.15));
+}
+
+.doof-star-beat {
+  opacity: calc(var(--star-base, 0.08) + var(--doof-beat) * 0.12);
+  transition: opacity 0.12s linear;
+}
