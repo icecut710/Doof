@@ -291,8 +291,11 @@ python -m doof gui</pre>
 
 
 def main() -> int:
-    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --no-sandbox")
+    # Hardware acceleration is the default. Only fall back to software
+    # rendering explicitly via DOOF_SOFTWARE_RENDERING=1 (compat escape hatch).
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    if os.environ.get("DOOF_SOFTWARE_RENDERING") == "1":
+        os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --no-sandbox")
 
     start_api_background()
 

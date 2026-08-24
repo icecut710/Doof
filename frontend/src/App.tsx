@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { getToken, storeToken, clearToken, type Profile } from "./auth";
-import { cacheGet, cacheSet, cacheAge, cacheInvalidate } from "./cache";
+import { cacheGet, cacheSet, cacheAge, cacheInvalidate, dedupe } from "./cache";
 import Login from "./Login";
 
 /* =========================================================
@@ -151,20 +151,21 @@ async function api<T = Data>(path: string, opts?: RequestInit): Promise<T> {
   return json as T;
 }
 
-/** Cached GET: serves instantly from memory, refreshes in background. */
+/** Cached GET: serves instantly from memory, refreshes in background.
+ *  Identical concurrent requests are coalesced into one network call. */
 async function apiCached<T = Data>(path: string, ttlMs = 5000): Promise<T> {
   const cached = cacheGet<T>(path);
+  const revalidate = () =>
+    dedupe(path, () => api<T>(path))
+      .then((fresh) => cacheSet(path, fresh))
+      .catch(() => {});
+
   if (cached !== null) {
     const entryAge = Date.now() - (cacheAge(path) ?? 0);
-    if (entryAge > ttlMs) {
-      // revalidate in background — don't block the caller
-      void api<T>(path)
-        .then((fresh) => cacheSet(path, fresh))
-        .catch(() => {});
-    }
+    if (entryAge > ttlMs) void revalidate(); // background — never blocks
     return cached;
   }
-  const data = await api<T>(path);
+  const data = await dedupe(path, () => api<T>(path));
   cacheSet(path, data);
   return data;
 }
@@ -401,13 +402,13 @@ function NaddafAtmosphere() {
             src="./mrnaddaf.png"
             alt=""
             draggable={false}
-            className="h-full w-full scale-105 object-contain object-center blur-[20px] opacity-[0.08]"
+            className="h-full w-full scale-105 object-contain object-center blur-[10px] opacity-[0.18] saturate-[0.85]"
           />
         </div>
       </div>
 
-      {/* Dark overlay — keeps UI readable (90%) */}
-      <div className="absolute inset-0 bg-black/[0.9]" />
+      {/* Dark overlay — cinematic but the portrait stays visible */}
+      <div className="absolute inset-0 bg-black/[0.82]" />
 
       {/* Violet center glow */}
       <div className="absolute left-1/2 top-1/2 h-[480px] w-[480px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-violet-700/[0.065] blur-[140px]" />
@@ -2107,16 +2108,30 @@ export default function App() {
     return () => clearInterval(t);
   }, [ping]);
 
-  // Training status polling (global sidebar indicator only)
+  // Training status — adaptive: fast while training, relaxed when idle
   useEffect(() => {
     if (!online) return;
-    const t = setInterval(async () => {
+    let stop = false;
+    const tick = async () => {
       try {
         const d = await api<{ running: boolean }>("/api/training");
+        if (stop) return;
         setTrainRunning(d.running ?? false);
-      } catch { /* ignore */ }
-    }, 4000);
-    return () => clearInterval(t);
+        schedule((d.running ?? false) ? 2500 : 12000);
+      } catch {
+        if (!stop) schedule(15000);
+      }
+    };
+    const timer = { id: 0 as ReturnType<typeof setInterval> | ReturnType<typeof setTimeout> };
+    const schedule = (ms: number) => {
+      clearTimeout(timer.id);
+      timer.id = setTimeout(() => void tick(), ms);
+    };
+    void tick();
+    return () => {
+      stop = true;
+      clearTimeout(timer.id);
+    };
   }, [online]);
 
   // Auto-scroll chat

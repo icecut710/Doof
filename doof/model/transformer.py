@@ -42,6 +42,9 @@ class DOOFTransformer(nn.Module):
         self.transformer = nn.TransformerEncoder(
             encoder_layer,
             num_layers=n_layers,
+            # norm_first=True disables the fast nested-tensor path anyway;
+            # set it explicitly so construction doesn't warn on every load.
+            enable_nested_tensor=False,
         )
 
         self.norm = nn.LayerNorm(d_model)

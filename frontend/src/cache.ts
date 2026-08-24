@@ -29,3 +29,14 @@ export function cacheInvalidate(prefix: string) {
 export function cacheClear() {
   store.clear();
 }
+
+// Identical in-flight GETs share one network request.
+const inflight = new Map<string, Promise<unknown>>();
+
+export function dedupe<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const existing = inflight.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+  const p = run().finally(() => inflight.delete(key));
+  inflight.set(key, p);
+  return p;
+}

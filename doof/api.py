@@ -167,6 +167,9 @@ def _public_profile(p: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+SESSION_TTL_SECONDS = 60 * 60 * 24 * 30  # Remember-me sessions last 30 days
+
+
 def _create_session(profile_id: str) -> str:
     token = uuid.uuid4().hex + uuid.uuid4().hex
     sessions: list[dict[str, Any]] = []
@@ -175,7 +178,21 @@ def _create_session(profile_id: str) -> str:
             sessions = json.loads(SESSIONS_PATH.read_text(encoding="utf-8"))
         except Exception:
             sessions = []
-    sessions.append({"token": token, "profile_id": profile_id, "created_at": _utcnow()})
+    now = time.time()
+    # Drop expired sessions on every write
+    sessions = [
+        s
+        for s in sessions
+        if s.get("expires_at", 0) > now
+    ]
+    sessions.append(
+        {
+            "token": token,
+            "profile_id": profile_id,
+            "created_at": _utcnow(),
+            "expires_at": now + SESSION_TTL_SECONDS,
+        }
+    )
     sessions = sessions[-200:]
     SESSIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SESSIONS_PATH.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
@@ -191,6 +208,9 @@ def _profile_from_token(token: str | None) -> dict[str, Any] | None:
         return None
     entry = next((s for s in sessions if s.get("token") == token), None)
     if not entry:
+        return None
+    # Expired tokens are invalid — no DOOF access.
+    if float(entry.get("expires_at", 0)) < time.time():
         return None
     profile = next(
         (p for p in _load_profiles() if p.get("id") == entry.get("profile_id")), None
@@ -267,28 +287,33 @@ def _supabase_signup(email: str, password: str) -> tuple[int, dict[str, Any]]:
         )
         with urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read())
-        session_token = data.get("access_token")
-        if session_token:
-            # Email confirmation disabled — verified immediately.
-            profiles = _load_profiles()
-            profile = next((p for p in profiles if p.get("email") == email), None)
-            if profile is None:
-                role = "owner" if not profiles else "trusted"
-                profile = {
-                    "id": (data.get("user") or {}).get("id") or str(uuid.uuid4()),
-                    "email": email,
-                    "name": "",
-                    "role": role,
-                    "created_at": _utcnow(),
-                    "provider": "supabase",
-                    "email_verified": True,
-                }
-                profiles.append(profile)
-                _save_profiles(profiles)
-            token = _create_session(profile["id"])
-            return 200, {"token": token, "profile": _public_profile(profile)}
-        # Confirmation email sent — no session until verified.
-        return 200, {"status": "verify_email_sent"}
+        user = data.get("user") or {}
+        # NEVER auto-authenticate a fresh signup. Even when Supabase returns
+        # an access_token (confirmation disabled), require verified identity:
+        # only proceed if the user's email is already confirmed.
+        confirmed = bool(user.get("email_confirmed_at")) or bool(
+            (user.get("identities") or [])
+            and all(i.get("email_verified") for i in user.get("identities") or [{}])
+        )
+        if not data.get("access_token") or not confirmed:
+            return 200, {"status": "verify_email_sent"}
+        profiles = _load_profiles()
+        profile = next((p for p in profiles if p.get("email") == email), None)
+        if profile is None:
+            role = "owner" if not profiles else "trusted"
+            profile = {
+                "id": user.get("id") or str(uuid.uuid4()),
+                "email": email,
+                "name": "",
+                "role": role,
+                "created_at": _utcnow(),
+                "provider": "supabase",
+                "email_verified": True,
+            }
+            profiles.append(profile)
+            _save_profiles(profiles)
+        token = _create_session(profile["id"])
+        return 200, {"token": token, "profile": _public_profile(profile)}
     except Exception as e:
         body = getattr(e, "read", None)
         msg = ""
@@ -375,13 +400,27 @@ def auth_oauth(access_token: str) -> tuple[int, dict[str, Any]]:
         return 401, {"error": f"Google authentication failed ({e})"}
 
 
+def _password_problem(password: str) -> str | None:
+    """Server-side password policy — mirrors the client, enforced for real."""
+    if len(password) < 8:
+        return "password must be at least 8 characters"
+    if not re.search(r"[A-Za-z]", password):
+        return "password must contain a letter"
+    if not re.search(r"\d", password):
+        return "password must contain a number"
+    return None
+
+
 def auth_signup(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     email = (body.get("email") or "").strip().lower()
     password = body.get("password") or ""
     if not email or not password:
         return 400, {"error": "email and password required"}
-    if len(password) < 6:
-        return 400, {"error": "password must be at least 6 characters"}
+    if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        return 400, {"error": "enter a valid email address"}
+    problem = _password_problem(password)
+    if problem:
+        return 400, {"error": problem}
 
     profiles = _load_profiles()
     if any(p.get("email") == email for p in profiles):
@@ -504,6 +543,44 @@ def _db():
 # ---------------------------------------------------------------------------
 
 
+def _bootstrap_initial_checkpoint() -> Path:
+    """First run with no trained checkpoint: create a real, valid initial
+    checkpoint from freshly initialized weights.  This is the model's
+    legitimate untrained state — not fake training.  Training from here is
+    fully real; the brain simply starts at version 1.0.0 untrained."""
+    import torch
+
+    from doof.model import DOOFTransformer
+    from doof.tokenizer import DOOFTokenizer
+
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    tok = DOOFTokenizer()
+    model = DOOFTransformer(
+        vocab_size=tok.vocab_size,
+        max_seq_len=128,
+        d_model=256,
+    )
+    path = CKPT_DIR / "doof_v01.pt"
+    if path.exists():
+        # Safety: never clobber a possibly-trained brain.
+        return path
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "step": 0,
+            "loss": None,
+            "model_config": {
+                "vocab_size": tok.vocab_size,
+                "max_seq_len": 128,
+                "d_model": 256,
+            },
+        },
+        path,
+    )
+    print(f"DOOF: initialized fresh brain at {path} (untrained v1.0.0)")
+    return path
+
+
 def _find_ckpt(pref: str | None = None) -> Path:
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
     if pref:
@@ -516,7 +593,8 @@ def _find_ckpt(pref: str | None = None) -> Path:
     steps = sorted(CKPT_DIR.glob("doof_step_*.pt"))
     if steps:
         return steps[-1]
-    raise FileNotFoundError("No checkpoint found. Run: python -m doof train")
+    # Fresh installation — safely initialize instead of erroring.
+    return _bootstrap_initial_checkpoint()
 
 
 def get_inf(ckpt: str | None = None):

@@ -27,6 +27,7 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [server, setServerUrl] = useState(getServer());
   const [showServer, setShowServer] = useState(false);
@@ -56,8 +57,12 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
     setErr("");
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
       return setErr("Enter a valid email address.");
-    if (password.length < 6)
-      return setErr("Password must be at least 6 characters.");
+    if (password.length < 8)
+      return setErr("Password must be at least 8 characters.");
+    if (!/[A-Za-z]/.test(password) || !/\d/.test(password))
+      return setErr("Password needs at least one letter and one number.");
+    if (mode === "signup" && password !== confirmPw)
+      return setErr("Passwords don't match.");
     setBusy(true);
     try {
       setServer(server);
@@ -184,6 +189,21 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
                 {showPw ? "🙈" : "👁"}
               </button>
             </div>
+
+            {mode === "signup" && (
+              <div className="relative">
+                <input
+                  className={input + " pr-10"}
+                  type={showPw ? "text" : "password"}
+                  required
+                  minLength={8}
+                  autoComplete="new-password"
+                  placeholder="Confirm password"
+                  value={confirmPw}
+                  onChange={(e) => setConfirmPw(e.target.value)}
+                />
+              </div>
+            )}
 
             {mode === "signup" && (
               <p className="px-1 text-[8px] leading-relaxed text-zinc-600">
