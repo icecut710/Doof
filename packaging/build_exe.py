@@ -1,13 +1,19 @@
-"""DOOF v0.2 — friend-ready onedir EXE build.
+"""DOOF v0.2 — friend-ready onedir EXE build (Windows).
 
-Run from the project root (Windows recommended for QtWebEngine):
+Run from the project root:
 
     python packaging/build_exe.py
+    # or double-click / run:
+    packaging\build.bat
 
-Steps:
-  1. npm install + production frontend build
-  2. Verify mrnaddaf / icon / checkpoint assets
+Pipeline (ALWAYS in this order):
+  1. npm install + production frontend build  →  frontend/dist/index.html
+  2. Verify assets (icon, dist, checkpoint)
   3. PyInstaller onedir via packaging/doof.spec
+  4. Copy .env.example next to DOOF.exe + print checklist
+
+This is the ONLY supported way to ship a usable EXE. Skipping step 1
+causes "Failed to load UI" / "Frontend UI is missing" at runtime.
 """
 from __future__ import annotations
 
@@ -33,19 +39,23 @@ def build_frontend() -> None:
         print("[build] ERROR: frontend/package.json missing")
         sys.exit(1)
 
-    print("[build] Installing frontend dependencies…")
+    print("\n========== 1/4  FRONTEND PRODUCTION BUILD ==========")
+    print("[build] npm install…")
     run("npm install", cwd=frontend, shell=True)
 
-    print("[build] Production frontend build…")
-    run("npm run build", cwd=frontend, shell=True)
+    print("[build] npm run build…")
+    r = subprocess.run("npm run build", cwd=str(frontend), shell=True)
+    if r.returncode != 0:
+        print("[build] full build failed — trying build:fast (vite only)…")
+        run("npm run build:fast", cwd=frontend, shell=True)
 
     index = frontend / "dist" / "index.html"
     if not index.is_file():
         print(f"[build] ERROR: expected {index}")
+        print("[build] UI will NOT load in the EXE without this file.")
         sys.exit(1)
     print(f"[build] OK frontend → {index}")
 
-    # Vite copies public/ into dist/
     naddaf = frontend / "dist" / "mrnaddaf.png"
     if not naddaf.is_file():
         src = frontend / "public" / "mrnaddaf.png"
@@ -57,73 +67,96 @@ def build_frontend() -> None:
 
 
 def verify_assets() -> None:
+    print("\n========== 2/4  VERIFY ASSETS ==========")
     required = [
-        ROOT / "assets" / "doof_icon.ico",
         ROOT / "frontend" / "dist" / "index.html",
-        ROOT / "checkpoints" / "doof_v01.pt",
+        ROOT / "doof" / "__main__.py",
+        ROOT / "packaging" / "doof.spec",
     ]
-    optional_icon = ROOT / "assets" / "doof.ico"
     for p in required:
         if not p.exists():
-            if p.name == "doof_icon.ico" and optional_icon.exists():
-                continue
-            if p.name == "doof_v01.pt":
-                print(f"[build] WARNING: {p} missing — first run will bootstrap weights")
-                continue
             print(f"[build] ERROR: required asset missing: {p}")
             sys.exit(1)
         print(f"[build] OK {p.relative_to(ROOT)}")
 
+    icon = ROOT / "assets" / "doof_icon.ico"
+    if not icon.is_file():
+        icon = ROOT / "assets" / "doof.ico"
+    if icon.is_file():
+        print(f"[build] OK {icon.relative_to(ROOT)}")
+    else:
+        print("[build] WARNING: no app icon found in assets/")
+
+    ckpt = ROOT / "checkpoints" / "doof_v01.pt"
+    if ckpt.is_file():
+        print(f"[build] OK {ckpt.relative_to(ROOT)}")
+    else:
+        print("[build] WARNING: checkpoints/doof_v01.pt missing — first run bootstraps weights")
+
 
 def build_exe() -> Path:
+    print("\n========== 3/4  PYINSTALLER ONEDIR ==========")
     spec = ROOT / "packaging" / "doof.spec"
-    if not spec.is_file():
-        print(f"[build] ERROR: {spec} not found")
-        sys.exit(1)
-
-    print("[build] Running PyInstaller (onedir)…")
-    run(
-        [
-            sys.executable,
-            "-m",
-            "PyInstaller",
-            str(spec),
-            "--clean",
-            "--noconfirm",
-            "--distpath",
-            str(ROOT / "dist"),
-            "--workpath",
-            str(ROOT / "build"),
-        ],
-        cwd=ROOT,
-    )
-
-    exe = ROOT / "dist" / "DOOF" / "DOOF.exe"
-    if not exe.is_file():
+    run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(spec)])
+    out = ROOT / "dist" / "DOOF" / "DOOF.exe"
+    if not out.is_file():
         alt = ROOT / "dist" / "DOOF" / "DOOF"
         if alt.is_file():
-            exe = alt
-    if not exe.exists():
-        print("[build] ERROR: DOOF executable not found under dist/DOOF/")
+            return alt
+        print(f"[build] ERROR: expected {out}")
         sys.exit(1)
+    return out
 
-    size_mb = exe.stat().st_size / (1024 * 1024)
-    print(f"[build] EXE: {exe} ({size_mb:.1f} MB)")
-    folder = ROOT / "dist" / "DOOF"
-    total = sum(p.stat().st_size for p in folder.rglob("*") if p.is_file())
-    print(f"[build] Folder: {folder} ({total / (1024 * 1024):.0f} MB total)")
-    return exe
+
+def post_copy(exe: Path) -> None:
+    print("\n========== 4/4  SHIP HELPERS ==========")
+    dest_dir = exe.parent
+    env_src = ROOT / ".env.example"
+    if env_src.is_file():
+        shutil.copy2(env_src, dest_dir / ".env.example")
+        print(f"[build] copied .env.example → {dest_dir / '.env.example'}")
+    readme = dest_dir / "README_FIRST.txt"
+    readme.write_text(
+        """DOOF v0.2 — first-run checklist\n"""
+        "================================\n\n"
+        "1. Copy .env.example to .env (same folder as DOOF.exe) OR\n"
+        "   put .env in %LOCALAPPDATA%\\DOOF\\\n\n"
+        "2. Fill in:\n"
+        "   SUPABASE_URL=https://YOUR_PROJECT.supabase.co\n"
+        "   SUPABASE_ANON_KEY=your_anon_key\n\n"
+        "3. Supabase Dashboard → Authentication → URL Configuration:\n"
+        "   Site URL:        http://127.0.0.1:8766\n"
+        "   Redirect URLs:   http://127.0.0.1:8766/**\n"
+        "                    http://127.0.0.1:8766/\n"
+        "                    http://localhost:3000/**\n"
+        "                    http://127.0.0.1:3000/**\n\n"
+        "4. Enable Google provider under Authentication → Providers\n"
+        "   (Client ID / Secret from Google Cloud Console)\n\n"
+        "5. Double-click DOOF.exe\n\n"
+        "Google button appears only when SUPABASE_URL + SUPABASE_ANON_KEY are set.\n"
+        "Email confirmation links must be opened on this same PC (DOOF is listening).\n",
+        encoding="utf-8",
+    )
+    print(f"[build] wrote {readme}")
 
 
 def main() -> int:
-    print("=== DOOF v0.2 friend-ready packaging ===")
+    print("DOOF v0.2 friend-ready build")
+    print(f"ROOT = {ROOT}")
+    if sys.platform != "win32":
+        print("[build] WARNING: QtWebEngine onedir EXE is intended for Windows.")
+        print("[build] Continuing anyway (useful for validating the frontend step).")
+
     build_frontend()
     verify_assets()
-    build_exe()
-    print()
-    print("Distribute the entire folder:")
-    print(f"  {ROOT / 'dist' / 'DOOF'}")
-    print("Friend runs:  DOOF.exe  (do not move only the .exe)")
+    exe = build_exe()
+    post_copy(exe)
+
+    print("\n========== BUILD COMPLETE ==========")
+    print(f"  EXE:  {exe}")
+    print(f"  DIR:  {exe.parent}")
+    print("  Zip the entire dist/DOOF/ folder to share with friends.")
+    print("  Put .env next to DOOF.exe before first launch.")
     return 0
 
 
