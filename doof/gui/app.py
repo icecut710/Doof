@@ -10,11 +10,21 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QPoint, QUrl, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 def _root() -> Path:
@@ -134,34 +144,132 @@ class DOOFPage(QWebEnginePage):
         print(f"[JS {level}] {sourceID}:{lineNumber} {message}")
 
 
-class DOOFWindow(QWebEngineView):
+class TitleBar(QFrame):
+    """Custom dark title bar — no Windows chrome."""
+
+    def __init__(self, window: "DOOFWindow") -> None:
+        super().__init__(window)
+        self._win = window
+        self.setObjectName("titlebar")
+        self.setFixedHeight(34)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 0, 0)
+        layout.setSpacing(8)
+
+        logo = QLabel("◆")
+        logo.setObjectName("tb-logo")
+
+        title = QLabel("DOOF")
+        title.setObjectName("tb-title")
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        self.btn_min = QPushButton("–")
+        self.btn_max = QPushButton("□")
+        self.btn_close = QPushButton("✕")
+        for b in (self.btn_min, self.btn_max, self.btn_close):
+            b.setObjectName("tb-button")
+            b.setFixedSize(42, 34)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setObjectName("tb-close")
+
+        for w in (logo, title, spacer, self.btn_min, self.btn_max, self.btn_close):
+            layout.addWidget(w)
+
+        self.btn_min.clicked.connect(window.showMinimized)
+        self.btn_max.clicked.connect(window.toggle_maximize)
+        self.btn_close.clicked.connect(window.close)
+
+
+class DOOFWindow(QWidget):
+    """Frameless desktop shell wrapping the web UI — Synapse X / Linear feel."""
+
+    DEFAULT_W, DEFAULT_H = 900, 600
+    MIN_W, MIN_H = 850, 550
+    MAX_W, MAX_H = 1200, 750
+
     def __init__(self, ui_url: str):
         super().__init__()
         self.setWindowTitle("DOOF")
-        self.resize(1180, 720)
-        self.setMinimumSize(900, 560)
-        self.setStyleSheet("QWebEngineView { background: #050506; border: none; }")
+        self.resize(self.DEFAULT_W, self.DEFAULT_H)
+        self.setMinimumSize(self.MIN_W, self.MIN_H)
+        self.setMaximumSize(self.MAX_W, self.MAX_H)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self._drag_pos: QPoint | None = None
 
-        page = DOOFPage(self)
-        self.setPage(page)
+        self.setStyleSheet(
+            """
+            QWidget#doof-root { background: #050506; }
+            QFrame#titlebar { background: #070708; border-bottom: 1px solid #17171b; }
+            QLabel#tb-logo { color: #a78bfa; font-size: 13px; }
+            QLabel#tb-title { color: #e4e4e7; font-size: 11px; font-weight: 600;
+                              font-family: 'Segoe UI'; letter-spacing: 1px; }
+            QPushButton#tb-button, QPushButton#tb-close {
+                border: none; background: transparent; color: #71717a;
+                font-size: 12px; font-family: 'Segoe UI'; }
+            QPushButton#tb-button:hover { background: #18181b; color: #ffffff; }
+            QPushButton#tb-close:hover { background: #ef4444; color: white; }
+            QWebEngineView { border: none; background: #050506; }
+            """
+        )
 
-        s = self.settings()
+        root = QWidget(objectName="doof-root")
+        lay = QVBoxLayout(root)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self.titlebar = TitleBar(self)
+        lay.addWidget(self.titlebar)
+
+        self.view = QWebEngineView()
+        page = DOOFPage(self.view)
+        self.view.setPage(page)
+        s = self.view.settings()
         s.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
         s.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
         s.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         s.setAttribute(QWebEngineSettings.WebAttribute.ErrorPageEnabled, True)
         s.setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True)
+        self.view.page().setBackgroundColor(QColor("#050506"))
+        self.view.loadFinished.connect(self._on_load_finished)
+        lay.addWidget(self.view)
 
-        self.page().setBackgroundColor(QColor("#050506"))
-        self.loadFinished.connect(self._on_load_finished)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(root)
 
         print(f"DOOF: loading {ui_url}")
-        self.load(QUrl(ui_url))
+        self.view.load(QUrl(ui_url))
 
+    # ---- window controls -------------------------------------------------
+    def toggle_maximize(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if (
+            self._drag_pos is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and not self.isMaximized()
+        ):
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._drag_pos = None
+
+    # ---- web ---------------------------------------------------------------
     def _on_load_finished(self, ok: bool) -> None:
         print(f"DOOF: page load {'ok' if ok else 'FAILED'}")
         if not ok:
-            self.setHtml(
+            self.view.setHtml(
                 """
                 <!doctype html><html><body style="margin:0;background:#050506;color:#ccc;
                 font-family:Segoe UI,sans-serif;display:flex;align-items:center;

@@ -6,12 +6,15 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { getToken, storeToken, clearToken, type Profile } from "./auth";
+import { cacheGet, cacheSet, cacheAge, cacheInvalidate } from "./cache";
+import Login from "./Login";
 
 /* =========================================================
    TYPES
    ========================================================= */
 
-type Page = "chat" | "memory" | "training" | "network" | "models" | "settings";
+type Page = "chat" | "memory" | "training" | "network" | "hardware" | "models" | "settings";
 
 type Msg = {
   id: string;
@@ -122,12 +125,23 @@ type HardwareInfo = {
 
 type Data = Record<string, unknown>;
 
-const API = "http://127.0.0.1:8765";
+function serverBase(): string {
+  try {
+    return localStorage.getItem("doof_server") || "http://127.0.0.1:8765";
+  } catch {
+    return "http://127.0.0.1:8765";
+  }
+}
 
 async function api<T = Data>(path: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
+  const token = getToken();
+  const res = await fetch(`${serverBase()}${path}`, {
     ...opts,
-    headers: { "Content-Type": "application/json", ...(opts?.headers ?? {}) },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(opts?.headers ?? {}),
+    },
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok)
@@ -135,6 +149,24 @@ async function api<T = Data>(path: string, opts?: RequestInit): Promise<T> {
       (json as { error?: string }).error ?? res.statusText ?? "Request failed",
     );
   return json as T;
+}
+
+/** Cached GET: serves instantly from memory, refreshes in background. */
+async function apiCached<T = Data>(path: string, ttlMs = 5000): Promise<T> {
+  const cached = cacheGet<T>(path);
+  if (cached !== null) {
+    const entryAge = Date.now() - (cacheAge(path) ?? 0);
+    if (entryAge > ttlMs) {
+      // revalidate in background — don't block the caller
+      void api<T>(path)
+        .then((fresh) => cacheSet(path, fresh))
+        .catch(() => {});
+    }
+    return cached;
+  }
+  const data = await api<T>(path);
+  cacheSet(path, data);
+  return data;
 }
 
 function uid() {
@@ -314,13 +346,14 @@ function StatusDot({ on }: { on: boolean }) {
 function StarField() {
   const stars = useMemo(
     () =>
-      Array.from({ length: 80 }, (_, i) => ({
-        left: `${(i * 19.37) % 100}%`,
-        top: `${(i * 37.13 + 4) % 100}%`,
-        size: i % 11 === 0 ? 1.5 : 1,
-        opacity: 0.06 + ((i * 17) % 22) / 100,
-        delay: `${(i % 8) * 0.55}s`,
-        duration: `${6 + (i % 6)}s`,
+      Array.from({ length: 26 }, (_, i) => ({
+        left: `${(i * 23.37 + 7) % 100}%`,
+        top: `${(i * 41.13 + 11) % 100}%`,
+        size: i % 9 === 0 ? 1.5 : 1,
+        opacity: 0.05 + ((i * 17) % 18) / 100,
+        // Only a few stars gently pulse — static dots are free.
+        twinkle: i < 6,
+        delay: `${(i % 6) * 0.8}s`,
       })),
     [],
   );
@@ -329,14 +362,14 @@ function StarField() {
       {stars.map((s, i) => (
         <span
           key={i}
-          className="absolute rounded-full bg-white"
+          className={s.twinkle ? "absolute rounded-full bg-white doof-pulse" : "absolute rounded-full bg-white"}
           style={{
             left: s.left,
             top: s.top,
             width: s.size,
             height: s.size,
             opacity: s.opacity,
-            animation: `doof-star ${s.duration} ease-in-out ${s.delay} infinite alternate`,
+            animationDelay: s.twinkle ? s.delay : undefined,
           }}
         />
       ))}
@@ -365,13 +398,16 @@ function NaddafAtmosphere() {
           }}
         >
           <img
-            src="/mrnaddaf.png"
+            src="./mrnaddaf.png"
             alt=""
             draggable={false}
-            className="h-full w-full object-contain object-center grayscale contrast-[1.14] brightness-[0.92] opacity-[0.72] mix-blend-screen"
+            className="h-full w-full scale-105 object-contain object-center blur-[20px] opacity-[0.08]"
           />
         </div>
       </div>
+
+      {/* Dark overlay — keeps UI readable (90%) */}
+      <div className="absolute inset-0 bg-black/[0.9]" />
 
       {/* Violet center glow */}
       <div className="absolute left-1/2 top-1/2 h-[480px] w-[480px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-violet-700/[0.065] blur-[140px]" />
@@ -394,11 +430,12 @@ function NaddafAtmosphere() {
    ========================================================= */
 
 const NAV_ITEMS: { id: Page; label: string; icon: string; section: string }[] = [
-  { id: "chat", label: "Chat", icon: "◆", section: "DOOF" },
-  { id: "memory", label: "Memory", icon: "◇", section: "DOOF" },
-  { id: "training", label: "Training", icon: "↯", section: "LEARN" },
+  { id: "chat", label: "Chat", icon: "◆", section: "CHAT" },
+  { id: "memory", label: "Memory", icon: "◇", section: "CHAT" },
+  { id: "training", label: "Training", icon: "↯", section: "CHAT" },
   { id: "network", label: "Network", icon: "⬡", section: "COMPUTE" },
-  { id: "models", label: "Models", icon: "◈", section: "SYSTEM" },
+  { id: "hardware", label: "Hardware", icon: "▤", section: "COMPUTE" },
+  { id: "models", label: "Brain", icon: "◈", section: "SYSTEM" },
   { id: "settings", label: "Settings", icon: "⚙", section: "SYSTEM" },
 ];
 
@@ -415,7 +452,8 @@ function Sidebar({
   hw: HardwareInfo | null;
   trainRunning: boolean;
 }) {
-  const sections = ["DOOF", "LEARN", "COMPUTE", "SYSTEM"];
+  const [collapsed, setCollapsed] = useState(false);
+  const sections = ["CHAT", "COMPUTE", "SYSTEM"];
   const gpuName =
     hw?.cuda_available && hw.cuda_devices[0]
       ? hw.cuda_devices[0].name
@@ -424,19 +462,47 @@ function Sidebar({
         : "CPU";
 
   return (
-    <aside className="flex w-[160px] shrink-0 flex-col border-r border-white/[0.045] bg-[#030304]/96 backdrop-blur-xl">
+    <aside
+      className={[
+        "flex shrink-0 flex-col border-r border-white/[0.045]",
+        "bg-[#030304]/96 backdrop-blur-xl transition-all duration-200",
+        collapsed ? "w-[52px]" : "w-[180px]",
+      ].join(" ")}
+    >
       {/* Logo */}
       <div className="flex h-[46px] shrink-0 items-center gap-2 border-b border-white/[0.045] px-3">
-        <div className="flex h-6 w-6 items-center justify-center rounded-[8px] border border-violet-400/20 bg-violet-500/[0.065] text-[9px] font-bold text-violet-300 shadow-[0_0_14px_rgba(124,58,237,0.1)]">
+        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[8px] border border-violet-400/20 bg-violet-500/[0.065] text-[9px] font-bold text-violet-300 shadow-[0_0_14px_rgba(124,58,237,0.1)]">
           ◆
         </div>
-        <div>
-          <div className="text-[11px] font-semibold tracking-tight text-zinc-100">DOOF</div>
-          <div className="text-[7px] uppercase tracking-[0.18em] text-zinc-700">
-            v0.2α · local
+        {!collapsed && (
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] font-semibold tracking-tight text-zinc-100">DOOF</div>
+            <div className="text-[7px] uppercase tracking-[0.18em] text-zinc-700">
+              v0.2α · local
+            </div>
           </div>
-        </div>
+        )}
+        {!collapsed && (
+          <button
+            type="button"
+            title="Collapse sidebar"
+            onClick={() => setCollapsed(true)}
+            className="text-[9px] text-zinc-800 transition hover:text-violet-300"
+          >
+            «
+          </button>
+        )}
       </div>
+      {collapsed && (
+        <button
+          type="button"
+          title="Expand sidebar"
+          onClick={() => setCollapsed(false)}
+          className="mx-auto mt-2 text-[10px] text-zinc-700 transition hover:text-violet-300"
+        >
+          »
+        </button>
+      )}
 
       {/* Nav */}
       <nav className="flex-1 overflow-y-auto px-1.5 py-2">
@@ -461,20 +527,20 @@ function Sidebar({
                       "rounded-xl px-2 py-1.5 text-left",
                       "text-[10px] transition-all duration-200",
                       active
-                        ? "bg-violet-500/[0.11] text-violet-200 shadow-[inset_0_0_0_1px_rgba(139,92,246,0.16)]"
-                        : "text-zinc-600 hover:bg-white/[0.025] hover:text-zinc-400",
+                        ? "bg-violet-500/[0.11] text-violet-200 shadow-[inset_0_0_0_1px_rgba(139,92,246,0.18),0_0_18px_rgba(139,92,246,0.12)]"
+                        : "text-zinc-400 hover:bg-white/[0.025] hover:text-zinc-100",
                     ].join(" ")}
                   >
                     <span
                       className={[
-                        "w-3.5 text-center text-[8px]",
-                        active ? "text-violet-400" : "text-zinc-800",
+                        "w-3.5 shrink-0 text-center text-[8px]",
+                        active ? "text-violet-400" : "text-zinc-500",
                       ].join(" ")}
                     >
                       {item.icon}
                     </span>
-                    <span className="flex-1">{item.label}</span>
-                    {isTraining && (
+                    {!collapsed && <span className="flex-1">{item.label}</span>}
+                    {isTraining && !collapsed && (
                       <span className="h-1.5 w-1.5 rounded-full bg-violet-400 shadow-[0_0_6px_rgba(139,92,246,0.8)]" />
                     )}
                   </button>
@@ -489,11 +555,11 @@ function Sidebar({
       <div className="shrink-0 border-t border-white/[0.045] px-2.5 py-2">
         <div className="flex items-center gap-1.5">
           <StatusDot on={online} />
-          <span className="text-[8px] uppercase tracking-[0.13em] text-zinc-600">
-            {online ? "Online" : "Offline"}
+          <span className="text-[8px] uppercase tracking-[0.13em] text-zinc-400">
+            {online ? "BRAIN ONLINE" : "BRAIN OFFLINE"}
           </span>
         </div>
-        <div className="mt-0.5 truncate text-[8px] text-zinc-800" title={gpuName}>
+        <div className="mt-0.5 truncate text-[8px] text-zinc-500" title={gpuName}>
           {gpuName}
         </div>
       </div>
@@ -651,16 +717,16 @@ function ChatTab({
                 <div className="mx-auto flex h-9 w-9 items-center justify-center rounded-[12px] border border-violet-400/15 bg-violet-500/[0.055] text-[13px] font-semibold text-violet-300/85 shadow-[0_0_24px_rgba(124,58,237,0.1)]">
                   ◆
                 </div>
-                <h1 className="mt-2.5 text-[17px] font-semibold tracking-[-0.03em] text-zinc-200">
+                <h1 className="mt-2.5 text-[17px] font-semibold tracking-[-0.03em] text-zinc-100">
                   DOOF
                 </h1>
-                <p className="mt-0.5 text-[9px] text-zinc-700">
-                  Private intelligence. Ready.
+                <p className="mt-0.5 text-[9px] text-zinc-500">
+                  your little evolving brain · ready to learn
                 </p>
                 <div className="mt-3 flex flex-wrap justify-center gap-1.5">
                   <StatusBadge tone={online ? "online" : "neutral"}>
                     <StatusDot on={online} />
-                    {online ? "Brain loaded" : "API offline"}
+                    {online ? "BRAIN ONLINE" : "COULDN'T REACH THE BRAIN"}
                   </StatusBadge>
                 </div>
                 <div className="mt-4 flex flex-wrap justify-center gap-1.5">
@@ -690,8 +756,8 @@ function ChatTab({
                       "max-w-[82%] rounded-2xl px-3 py-2",
                       "text-[11px] leading-relaxed",
                       msg.role === "user"
-                        ? "border border-violet-400/10 bg-violet-600/20 text-zinc-200"
-                        : "border border-white/[0.05] bg-[#09090a]/95 text-zinc-400",
+                        ? "border border-violet-400/10 bg-violet-600/20 text-zinc-100"
+                        : "border border-white/[0.05] bg-[#09090a]/95 text-zinc-100",
                       msg.pending ? "opacity-50" : "",
                     ].join(" ")}
                   >
@@ -726,16 +792,16 @@ function ChatTab({
                       <button
                         type="button"
                         onClick={() => void sendFeedback(msg, "good")}
-                        className="rounded-lg border border-white/[0.04] bg-white/[0.012] px-2 py-0.5 text-[8px] text-zinc-700 transition-all hover:border-emerald-400/20 hover:bg-emerald-400/[0.04] hover:text-emerald-400"
+                        className="rounded-lg border border-white/[0.04] bg-white/[0.012] px-2 py-0.5 text-[8px] text-zinc-400 transition-all hover:border-emerald-400/20 hover:bg-emerald-400/[0.04] hover:text-emerald-400"
                       >
                         👍 Good
                       </button>
                       <button
                         type="button"
                         onClick={() => void sendFeedback(msg, "bad")}
-                        className="rounded-lg border border-white/[0.04] bg-white/[0.012] px-2 py-0.5 text-[8px] text-zinc-700 transition-all hover:border-rose-400/20 hover:bg-rose-400/[0.04] hover:text-rose-400"
+                        className="rounded-lg border border-white/[0.04] bg-white/[0.012] px-2 py-0.5 text-[8px] text-zinc-400 transition-all hover:border-rose-400/20 hover:bg-rose-400/[0.04] hover:text-rose-400"
                       >
-                        👎 Correct
+                        👎 Teach
                       </button>
                     </div>
                   )}
@@ -813,7 +879,13 @@ function ChatTab({
                 void send();
               }
             }}
-            placeholder={online ? "Message DOOF…" : "Start the DOOF API…"}
+            placeholder={
+              busy
+                ? "DOOF is thinking…"
+                : online
+                  ? "Message DOOF…"
+                  : "Couldn't reach the DOOF brain…"
+            }
             disabled={!online || busy}
             className="min-w-0 flex-1 rounded-2xl border border-white/[0.06] bg-[#080809] px-3 py-2 text-[11px] text-zinc-200 outline-none shadow-[0_5px_24px_rgba(0,0,0,0.18)] placeholder:text-zinc-800 transition focus:border-violet-500/25 focus:shadow-[0_0_0_3px_rgba(139,92,246,0.04)] disabled:opacity-40"
           />
@@ -826,7 +898,7 @@ function ChatTab({
             {busy ? "···" : "Send"}
           </button>
         </div>
-        <div className="mt-1 text-center text-[7px] uppercase tracking-[0.15em] text-zinc-900">
+        <div className="mt-1 text-center text-[7px] uppercase tracking-[0.15em] text-zinc-600">
           DOOF · local inference
         </div>
       </div>
@@ -852,7 +924,7 @@ function MemoryTab({ online }: { online: boolean }) {
     if (!online) return;
     setLoading(true);
     try {
-      const data = await api<{ memories: MemoryItem[]; stats: MemoryStats }>("/api/memory");
+      const data = await apiCached<{ memories: MemoryItem[]; stats: MemoryStats }>("/api/memory", 10000);
       setMemories(data.memories ?? []);
       setStats(data.stats ?? { total: 0, approved: 0, pending: 0, high_importance: 0 });
     } finally {
@@ -881,11 +953,13 @@ function MemoryTab({ online }: { online: boolean }) {
     });
     setNewContent("");
     setShowAdd(false);
+    cacheInvalidate("/api/memory");
     void load();
   };
 
   const deleteMemory = async (id: string) => {
     await api(`/api/memory/${id}`, { method: "DELETE" });
+    cacheInvalidate("/api/memory");
     setMemories((m) => m.filter((x) => x.id !== id));
     setStats((s) => ({ ...s, total: s.total - 1, approved: s.approved - 1 }));
   };
@@ -898,6 +972,16 @@ function MemoryTab({ online }: { online: boolean }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
+      {/* Header */}
+      <div className="flex items-baseline justify-between">
+        <div>
+          <div className="text-[8px] uppercase tracking-[0.18em] text-zinc-500">
+            EVERYTHING DOOF REMEMBERS · FOREVER
+          </div>
+          <div className="mt-1 text-[13px] font-semibold text-zinc-100">MEMORY</div>
+        </div>
+      </div>
+
       {/* Stats row */}
       <div className="grid grid-cols-4 gap-1.5">
         <MetricCard label="Total" value={stats.total} />
@@ -912,10 +996,10 @@ function MemoryTab({ online }: { online: boolean }) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search memories…"
-          className="flex-1 rounded-xl border border-white/[0.055] bg-[#080809] px-3 py-1.5 text-[10px] text-zinc-300 outline-none placeholder:text-zinc-800 focus:border-violet-500/20"
+          className="flex-1 rounded-xl border border-white/[0.055] bg-[#080809] px-3 py-1.5 text-[10px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-violet-500/20"
         />
         <GlassButton onClick={() => setShowAdd(!showAdd)}>
-          {showAdd ? "Cancel" : "+ Add Memory"}
+          {showAdd ? "Cancel" : "+ Teach DOOF"}
         </GlassButton>
         <GlassButton variant="ghost" onClick={() => void load()}>
           ↻
@@ -984,15 +1068,64 @@ function MemoryTab({ online }: { online: boolean }) {
                   <span>by {mem.created_by}</span>
                 </div>
               </div>
-              <div className="flex shrink-0 flex-col items-end gap-1.5">
+              <div className="flex shrink-0 flex-col items-end gap-1">
                 {importanceBadge(mem.importance)}
-                <button
-                  type="button"
-                  onClick={() => void deleteMemory(mem.id)}
-                  className="text-[8px] text-zinc-800 transition hover:text-rose-400"
-                >
-                  Delete
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    title="Edit memory"
+                    onClick={() => {
+                      const next = window.prompt("Edit memory", mem.content);
+                      if (!next || next.trim() === mem.content) return;
+                      void (async () => {
+                        try {
+                          await api(`/api/memory/${mem.id}`, { method: "DELETE" });
+                          await api("/api/memory", {
+                            method: "POST",
+                            body: JSON.stringify({
+                              content: next.trim(),
+                              importance: mem.importance,
+                              category: mem.category,
+                              created_by: mem.created_by,
+                            }),
+                          });
+                          void load();
+                        } catch { /* ignore */ }
+                      })();
+                    }}
+                    className="text-[8px] text-zinc-800 transition hover:text-violet-300"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    title="Promote to training dataset"
+                    onClick={() =>
+                      void api("/api/approved_examples", {
+                        method: "POST",
+                        body: JSON.stringify({
+                          prompt: "What do you know about this?",
+                          response: mem.content,
+                          source: "memory",
+                          approved: true,
+                        }),
+                      })
+                        .then(() => cacheInvalidate("/api/approved_examples"))
+                        .then(() => void load())
+                        .catch(() => {})
+                    }
+                    className="text-[8px] text-zinc-800 transition hover:text-emerald-400"
+                  >
+                    Promote to training
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void deleteMemory(mem.id)}
+                    className="text-[8px] text-zinc-800 transition hover:text-rose-400"
+                  >
+                    Delete
+                  </button>
+                </div>
               </div>
             </div>
           ))}
@@ -1032,7 +1165,7 @@ function TrainingTab({ online }: { online: boolean }) {
   const refresh = useCallback(async () => {
     if (!online) return;
     try {
-      const data = await api<TrainState>("/api/training");
+      const data = await apiCached<TrainState>("/api/training", 1200);
       setTrain(data);
     } catch { /* ignore */ }
   }, [online]);
@@ -1044,6 +1177,21 @@ function TrainingTab({ online }: { online: boolean }) {
     const t = setInterval(() => void refresh(), 1200);
     return () => clearInterval(t);
   }, [online, refresh]);
+
+  const [showLogs, setShowLogs] = useState(false);
+  const [jobs, setJobs] = useState<{ id: string; status: string; created_at: string; worker: string | null }[]>([]);
+
+  const loadJobs = useCallback(async () => {
+    if (!online) return;
+    try {
+      const data = await api<typeof jobs>("/api/training/jobs");
+      setJobs(Array.isArray(data) ? data : []);
+    } catch { /* ignore */ }
+  }, [online]);
+
+  useEffect(() => {
+    if (showLogs) void loadJobs();
+  }, [showLogs, loadJobs]);
 
   const startTrain = async () => {
     await api("/api/training/start", { method: "POST", body: JSON.stringify({ epochs: 3 }) });
@@ -1075,15 +1223,15 @@ function TrainingTab({ online }: { online: boolean }) {
       {/* Header */}
       <div className="mb-4 flex items-start justify-between">
         <div>
-          <div className="text-[8px] uppercase tracking-[0.18em] text-zinc-700">
-            DOOF TRAINING CENTER
+          <div className="text-[8px] uppercase tracking-[0.18em] text-zinc-500">
+            MEMORY → FEEDBACK → TRAINING DATA → NEW BRAIN
           </div>
           <div className="mt-1 flex items-center gap-2">
-            <span className="text-[13px] font-semibold text-zinc-200">
-              Brain v{train.brain_version}
+            <span className="text-[13px] font-semibold text-zinc-100">
+              BRAIN v{train.brain_version}
             </span>
             <StatusBadge tone={train.running ? "violet" : "neutral"}>
-              {train.running ? "● Training" : "Ready"}
+              {train.running ? "● DOOF IS TRAINING" : "READY TO LEARN"}
             </StatusBadge>
           </div>
         </div>
@@ -1231,7 +1379,48 @@ function TrainingTab({ online }: { online: boolean }) {
         >
           Build Dataset
         </GlassButton>
+        <GlassButton
+          variant="ghost"
+          onClick={() => {
+            const text = window.prompt("Knowledge to teach DOOF (permanent):");
+            if (!text?.trim()) return;
+            void api("/api/knowledge", {
+              method: "POST",
+              body: JSON.stringify({ text: text.trim(), source: "upload" }),
+            }).then(() => void refresh()).catch(() => {});
+          }}
+          disabled={!online}
+        >
+          Upload Knowledge
+        </GlassButton>
+        <GlassButton
+          variant="ghost"
+          onClick={() => setShowLogs(!showLogs)}
+          disabled={!online}
+        >
+          {showLogs ? "Hide Logs" : "View Logs"}
+        </GlassButton>
       </div>
+
+      {/* Job logs */}
+      {showLogs && (
+        <GlassPanel className="mb-3 p-3">
+          <div className="mb-1.5 text-[8px] uppercase tracking-[0.15em] text-zinc-700">
+            Training Job Log
+          </div>
+          <div className="max-h-[140px] space-y-1 overflow-y-auto font-mono text-[8px] text-zinc-600">
+            {(jobs.length === 0 && <div>No training jobs yet.</div>) ||
+              jobs.map((j) => (
+                <div key={j.id} className="truncate">
+                  <span className={j.status === "done" ? "text-emerald-500/70" : "text-violet-400/70"}>
+                    [{j.status}]
+                  </span>{" "}
+                  {j.created_at} · worker {j.worker ?? "—"}
+                </div>
+              ))}
+          </div>
+        </GlassPanel>
+      )}
 
       {/* Loss curve */}
       <GlassPanel className="p-3.5">
@@ -1281,6 +1470,7 @@ function TrainingTab({ online }: { online: boolean }) {
 function NetworkTab({ online }: { online: boolean }) {
   const [nodes, setNodes] = useState<NodeItem[]>([]);
   const [totalVram, setTotalVram] = useState(0);
+
   const [trainingActive, setTrainingActive] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -1288,14 +1478,14 @@ function NetworkTab({ online }: { online: boolean }) {
     if (!online) return;
     setLoading(true);
     try {
-      const data = await api<{
+      const data = await apiCached<{
         nodes: NodeItem[];
         nodes_online: number;
         connected_users: number;
         total_vram_gb: number;
         training_active: boolean;
         workers_online: number;
-      }>("api/network");
+      }>("/api/network", 4000);
       setNodes(data.nodes ?? []);
       setTotalVram(data.total_vram_gb ?? 0);
       setTrainingActive(data.training_active ?? false);
@@ -1319,11 +1509,17 @@ function NetworkTab({ online }: { online: boolean }) {
     <div className="flex-1 overflow-y-auto p-4">
       {/* Header */}
       <div className="mb-4">
-        <div className="text-[8px] uppercase tracking-[0.18em] text-zinc-700">
-          DOOF COMPUTE NETWORK
+        <div className="text-[8px] uppercase tracking-[0.18em] text-zinc-500">
+          WHO'S HELPING DOOF THINK
         </div>
-        <div className="mt-1 text-[13px] font-semibold text-zinc-200">
-          Collaborative Brain
+        <div className="mt-1 text-[13px] font-semibold text-zinc-100">
+          NETWORK
+        </div>
+        <div className="mt-1 text-[8px] text-zinc-500">
+          {onlineNodes.length > 0
+            ? `${onlineNodes.length} NODE${onlineNodes.length === 1 ? "" : "S"} ONLINE · COMPUTE POOL ACTIVE`
+            : "NO NODES ONLINE"}{" "}
+          — distributed workers: each job runs on one node, not shared-gradient training.
         </div>
       </div>
 
@@ -1441,8 +1637,8 @@ function ModelsTab({ online }: { online: boolean }) {
   const load = useCallback(async () => {
     if (!online) return;
     const [vers, info] = await Promise.all([
-      api<{ checkpoints: CheckpointItem[] }>("/api/models/versions"),
-      api<Data>("/api/model"),
+      apiCached<{ checkpoints: CheckpointItem[] }>("/api/models/versions", 20000),
+      apiCached<Data>("/api/model", 20000),
     ]);
     setCkpts(vers.checkpoints ?? []);
     setModelInfo(info);
@@ -1595,9 +1791,11 @@ function ModelsTab({ online }: { online: boolean }) {
 function SettingsTab({
   online,
   hw,
+  onLogout,
 }: {
   online: boolean;
   hw: HardwareInfo | null;
+  onLogout?: () => void;
 }) {
   const [sett, setSett] = useState({ temperature: 0.7, max_new_tokens: 80, top_k: 50 });
   const [cloud, setCloud] = useState<Data>({});
@@ -1705,6 +1903,16 @@ function SettingsTab({
           </div>
         </section>
 
+        {/* Account */}
+        {onLogout && (
+          <section>
+            <div className="mb-2 text-[8px] uppercase tracking-[0.16em] text-zinc-700">Account</div>
+            <GlassButton variant="danger" onClick={onLogout}>
+              Sign out
+            </GlassButton>
+          </section>
+        )}
+
         {/* About */}
         <section>
           <div className="mb-2 text-[8px] uppercase tracking-[0.16em] text-zinc-700">About</div>
@@ -1760,7 +1968,62 @@ function TopBar({
    ROOT APP
    ========================================================= */
 
+/* =========================================================
+   HARDWARE TAB
+   ========================================================= */
+
+function HardwareTab({ hw, online }: { hw: HardwareInfo | null; online: boolean }) {
+  const gpus = hw?.cuda_devices ?? [];
+  return (
+    <div className="flex-1 overflow-y-auto p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="text-[13px] font-semibold text-zinc-200">Hardware</span>
+        <StatusBadge tone={online ? "online" : "neutral"}>
+          <StatusDot on={online} />
+          {online ? "Reporting" : "Offline"}
+        </StatusBadge>
+      </div>
+      {!hw ? (
+        <div className="rounded-xl border border-white/[0.04] px-4 py-8 text-center text-[10px] text-zinc-800">
+          Waiting for hardware report…
+        </div>
+      ) : (
+        <>
+          <div className="mb-3 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+            <MetricCard label="Device" value={hw.device.toUpperCase()} accent />
+            <MetricCard label="Platform" value={hw.platform} sub={hw.machine} />
+            <MetricCard label="CPU Cores" value={hw.cpu_count ?? "—"} />
+            <MetricCard label="Torch" value={hw.torch_version ?? "—"} />
+          </div>
+          <div className="mb-1.5 text-[8px] uppercase tracking-[0.15em] text-zinc-700">GPUs</div>
+          {gpus.length === 0 ? (
+            <div className="rounded-xl border border-white/[0.04] px-4 py-6 text-center text-[10px] text-zinc-800">
+              No CUDA GPU detected{hw.mps_available ? " · Apple MPS available" : ""} — training
+              will run on CPU.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {gpus.map((g, i) => (
+                <div
+                  key={i}
+                  className="flex items-center justify-between rounded-xl border border-white/[0.04] bg-white/[0.01] px-3 py-2"
+                >
+                  <span className="text-[10px] text-zinc-300">{g.name}</span>
+                  <span className="text-[9px] tabular-nums text-violet-300/80">
+                    {g.total_memory_gb} GB VRAM
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
+  const [profile, setProfile] = useState<Profile | null | undefined>(undefined);
   const [page, setPage] = useState<Page>("chat");
   const [online, setOnline] = useState(false);
   const [hw, setHw] = useState<HardwareInfo | null>(null);
@@ -1773,17 +2036,66 @@ export default function App() {
   const [sett] = useState({ temperature: 0.7, max_new_tokens: 80, top_k: 50 });
   const [trainRunning, setTrainRunning] = useState(false);
 
+  // Validate stored session / handle Google OAuth redirect on startup
+  useEffect(() => {
+    const hash = window.location.hash;
+    const m = hash.match(/access_token=([^&]+)/);
+    if (m) {
+      // Google OAuth (Supabase implicit flow) returned to us — exchange it.
+      history.replaceState(null, "", window.location.pathname);
+      fetch(`${serverBase()}/api/auth/oauth`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access_token: decodeURIComponent(m[1]) }),
+      })
+        .then((r) => r.json())
+        .then((d: { token?: string; profile?: Profile; error?: string }) => {
+          if (d.token && d.profile) {
+            storeToken(d.token, true);
+            setProfile(d.profile);
+          } else {
+            setProfile(null);
+          }
+        })
+        .catch(() => setProfile(null));
+      return;
+    }
+
+    const token = getToken();
+    if (!token) {
+      setProfile(null);
+      return;
+    }
+    api<{ profile: Profile | null }>("/api/me")
+      .then((d) => setProfile(d.profile ?? null))
+      .catch(() => setProfile(null));
+  }, []);
+
+  const doLogout = useCallback(async () => {
+    try {
+      await api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) });
+    } catch { /* ignore */ }
+    clearToken();
+    setProfile(null);
+  }, []);
+
   const inputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Health + hardware polling
+  // Health + hardware — parallel, cached; heartbeat lives server-side
   const ping = useCallback(async () => {
     try {
       await api("/api/health");
       setOnline(true);
       setErr("");
-      const hwData = await api<HardwareInfo>("/api/hardware");
-      setHw(hwData);
+      const cachedHw = cacheGet<HardwareInfo>("/api/hardware");
+      if (cachedHw) setHw(cachedHw);
+      void api<HardwareInfo>("/api/hardware")
+        .then((hwData) => {
+          cacheSet("/api/hardware", hwData);
+          setHw(hwData);
+        })
+        .catch(() => {});
     } catch {
       setOnline(false);
     }
@@ -1791,11 +2103,11 @@ export default function App() {
 
   useEffect(() => {
     void ping();
-    const t = setInterval(() => void ping(), 5000);
+    const t = setInterval(() => void ping(), 10000);
     return () => clearInterval(t);
   }, [ping]);
 
-  // Training status polling (global, for sidebar indicator)
+  // Training status polling (global sidebar indicator only)
   useEffect(() => {
     if (!online) return;
     const t = setInterval(async () => {
@@ -1803,7 +2115,7 @@ export default function App() {
         const d = await api<{ running: boolean }>("/api/training");
         setTrainRunning(d.running ?? false);
       } catch { /* ignore */ }
-    }, 3000);
+    }, 4000);
     return () => clearInterval(t);
   }, [online]);
 
@@ -1811,6 +2123,22 @@ export default function App() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [msgs]);
+
+  // ---- Auth gate -------------------------------------------------------
+  if (profile === undefined) {
+    return <div className="h-screen w-screen bg-[#030304]" />;
+  }
+
+  if (profile === null) {
+    return (
+      <div className="relative h-screen w-screen overflow-hidden bg-[#030304] text-zinc-300">
+        <NaddafAtmosphere />
+        <div className="relative z-10 flex h-full items-center justify-center overflow-y-auto">
+          <Login onLogin={setProfile} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#030304] text-zinc-300 selection:bg-violet-500/25">
@@ -1845,7 +2173,7 @@ export default function App() {
         <main className="flex min-w-0 flex-1 flex-col">
           <TopBar page={page} online={online} hw={hw} err={err} />
 
-          <div className="flex min-h-0 flex-1 flex-col">
+          <div className="mx-auto flex min-h-0 w-full max-w-[900px] flex-1 flex-col">
             {page === "chat" && (
               <ChatTab
                 msgs={msgs}
@@ -1863,8 +2191,11 @@ export default function App() {
             {page === "memory" && <MemoryTab online={online} />}
             {page === "training" && <TrainingTab online={online} />}
             {page === "network" && <NetworkTab online={online} />}
+            {page === "hardware" && <HardwareTab hw={hw} online={online} />}
             {page === "models" && <ModelsTab online={online} />}
-            {page === "settings" && <SettingsTab online={online} hw={hw} />}
+            {page === "settings" && (
+              <SettingsTab online={online} hw={hw} onLogout={() => void doLogout()} />
+            )}
           </div>
         </main>
       </div>

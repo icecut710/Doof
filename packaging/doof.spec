@@ -36,6 +36,7 @@ a = Analysis(
         "database",
         "database.local",
         "database.supabase",
+        "dotenv",
         "PySide6",
         "PySide6.QtCore",
         "PySide6.QtGui",

@@ -46,6 +46,7 @@ DELETE /api/approved_examples/{id}
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import threading
@@ -56,6 +57,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:  # dotenv optional in frozen builds
+    pass
 
 from database import get_db
 
@@ -71,6 +79,11 @@ KNOW = DATA_DIR / "knowledge.json"
 SETT = DATA_DIR / "settings.json"
 NODES_PATH = DATA_DIR / "nodes.json"
 VERSIONS_PATH = DATA_DIR / "brain_versions.json"
+VERSIONS_PATH = DATA_DIR / "brain_versions.json"
+PROFILES_PATH = DATA_DIR / "profiles.json"
+SESSIONS_PATH = DATA_DIR / "sessions.json"
+
+# Heartbeat thread interval (seconds)
 
 # Heartbeat thread interval (seconds)
 _HEARTBEAT_INTERVAL = 30
@@ -107,6 +120,344 @@ _settings = {
 # Local node identity (set on first registration / heartbeat)
 _local_node_id: str | None = None
 
+# Local node identity (set on first registration / heartbeat)
+_local_node_id: str | None = None
+
+# ---------------------------------------------------------------------------
+# Auth — local profiles (Owner / Trusted) + sessions
+# ---------------------------------------------------------------------------
+
+def _utcnow() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _load_profiles() -> list[dict[str, Any]]:
+    if not PROFILES_PATH.exists():
+        return []
+    try:
+        data = json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_profiles(profiles: list[dict[str, Any]]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    PROFILES_PATH.write_text(
+        json.dumps(profiles, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _hash_password(password: str, salt: str) -> str:
+    import hashlib
+
+    return hashlib.scrypt(
+        password.encode("utf-8"), salt=salt.encode("utf-8"), n=16384, r=8, p=1
+    ).hex()
+
+
+def _public_profile(p: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": p.get("id"),
+        "email": p.get("email"),
+        "name": p.get("name") or (p.get("email") or "").split("@")[0],
+        "role": p.get("role", "trusted"),
+        "created_at": p.get("created_at"),
+        "provider": p.get("provider", "local"),
+    }
+
+
+def _create_session(profile_id: str) -> str:
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    sessions: list[dict[str, Any]] = []
+    if SESSIONS_PATH.exists():
+        try:
+            sessions = json.loads(SESSIONS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            sessions = []
+    sessions.append({"token": token, "profile_id": profile_id, "created_at": _utcnow()})
+    sessions = sessions[-200:]
+    SESSIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SESSIONS_PATH.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
+    return token
+
+
+def _profile_from_token(token: str | None) -> dict[str, Any] | None:
+    if not token:
+        return None
+    try:
+        sessions = json.loads(SESSIONS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    entry = next((s for s in sessions if s.get("token") == token), None)
+    if not entry:
+        return None
+    profile = next(
+        (p for p in _load_profiles() if p.get("id") == entry.get("profile_id")), None
+    )
+    return _public_profile(profile) if profile else None
+
+
+def _bearer_token(h: BaseHTTPRequestHandler) -> str | None:
+    auth = h.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return None
+
+
+def _supabase_signin(
+    email: str, password: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Try Supabase password auth.
+
+    Returns ``(user, None)`` on success, ``(None, "email_unverified")`` when
+    the account exists but hasn't confirmed their email, or ``(None, None)``
+    when Supabase is not configured / unreachable (local fallback).
+    """
+    cfg = _supabase_cfg()
+    if not cfg:
+        return None, None
+    url, key = cfg
+    try:
+        from urllib.error import HTTPError
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            f"{url}/auth/v1/token?grant_type=password",
+            data=json.dumps({"email": email, "password": password}).encode(),
+            headers={"apikey": key, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        user = data.get("user") or {}
+        return {"id": user.get("id"), "email": user.get("email"), "provider": "supabase"}, None
+    except HTTPError as e:
+        try:
+            msg = json.loads(e.read().decode()).get("msg", "")
+        except Exception:
+            msg = ""
+        if "confirm" in msg.lower() or "verified" in msg.lower():
+            return None, "email_unverified"
+        return None, None
+    except Exception:
+        return None, None
+
+
+def _supabase_cfg() -> tuple[str, str] | None:
+    url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    key = os.environ.get("SUPABASE_ANON_KEY", "")
+    return (url, key) if url and key else None
+
+
+def _supabase_signup(email: str, password: str) -> tuple[int, dict[str, Any]]:
+    """Real signup through Supabase Auth (sends verification email)."""
+    cfg = _supabase_cfg()
+    if not cfg:
+        return 0, {}
+    url, key = cfg
+    try:
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            f"{url}/auth/v1/signup",
+            data=json.dumps({"email": email, "password": password}).encode(),
+            headers={"apikey": key, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        session_token = data.get("access_token")
+        if session_token:
+            # Email confirmation disabled — verified immediately.
+            profiles = _load_profiles()
+            profile = next((p for p in profiles if p.get("email") == email), None)
+            if profile is None:
+                role = "owner" if not profiles else "trusted"
+                profile = {
+                    "id": (data.get("user") or {}).get("id") or str(uuid.uuid4()),
+                    "email": email,
+                    "name": "",
+                    "role": role,
+                    "created_at": _utcnow(),
+                    "provider": "supabase",
+                    "email_verified": True,
+                }
+                profiles.append(profile)
+                _save_profiles(profiles)
+            token = _create_session(profile["id"])
+            return 200, {"token": token, "profile": _public_profile(profile)}
+        # Confirmation email sent — no session until verified.
+        return 200, {"status": "verify_email_sent"}
+    except Exception as e:
+        body = getattr(e, "read", None)
+        msg = ""
+        try:
+            msg = json.loads(body().decode()).get("msg", "") if callable(body) else ""
+        except Exception:
+            pass
+        if "already registered" in msg or "already exists" in msg:
+            return 409, {"error": "account already exists — sign in instead"}
+        return 502, {"error": f"Supabase connection lost ({msg or e})"}
+
+
+def auth_config() -> dict[str, Any]:
+    cfg = _supabase_cfg()
+    if cfg:
+        return {
+            "provider": "supabase",
+            "oauth": True,
+            "email_verification": True,
+            "authorize_url": f"{cfg[0]}/auth/v1/authorize?provider=google&response_type=token",
+        }
+    return {"provider": "local", "oauth": False, "email_verification": False}
+
+
+def auth_resend(email: str) -> tuple[int, dict[str, Any]]:
+    cfg = _supabase_cfg()
+    if not cfg:
+        return 400, {"error": "email verification requires Supabase"}
+    url, key = cfg
+    try:
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            f"{url}/auth/v1/resend",
+            data=json.dumps({"type": "signup", "email": email}).encode(),
+            headers={"apikey": key, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=8) as resp:
+            resp.read()
+        return 200, {"ok": True}
+    except Exception as e:
+        return 502, {"error": f"Couldn't reach Supabase ({e})"}
+
+
+def auth_oauth(access_token: str) -> tuple[int, dict[str, Any]]:
+    """Exchange a Supabase OAuth access token (Google implicit flow) for a
+    DOOF session.  Identity is verified server-side via /auth/v1/user."""
+    cfg = _supabase_cfg()
+    if not cfg:
+        return 400, {"error": "Google sign-in requires Supabase configuration"}
+    url, key = cfg
+    try:
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            f"{url}/auth/v1/user",
+            headers={"apikey": key, "Authorization": f"Bearer {access_token}"},
+            method="GET",
+        )
+        with urlopen(req, timeout=8) as resp:
+            user = json.loads(resp.read())
+        email = (user.get("email") or "").lower()
+        if not email:
+            return 401, {"error": "Google account has no email"}
+        profiles = _load_profiles()
+        profile = next((p for p in profiles if p.get("email") == email), None)
+        if profile is None:
+            role = "owner" if not profiles else "trusted"
+            profile = {
+                "id": user.get("id") or str(uuid.uuid4()),
+                "email": email,
+                "name": (user.get("user_metadata") or {}).get("full_name", ""),
+                "role": role,
+                "created_at": _utcnow(),
+                "provider": "google",
+                "email_verified": True,
+            }
+            profiles.append(profile)
+            _save_profiles(profiles)
+        token = _create_session(profile["id"])
+        return 200, {"token": token, "profile": _public_profile(profile)}
+    except Exception as e:
+        return 401, {"error": f"Google authentication failed ({e})"}
+
+
+def auth_signup(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    email = (body.get("email") or "").strip().lower()
+    password = body.get("password") or ""
+    if not email or not password:
+        return 400, {"error": "email and password required"}
+    if len(password) < 6:
+        return 400, {"error": "password must be at least 6 characters"}
+
+    profiles = _load_profiles()
+    if any(p.get("email") == email for p in profiles):
+        return 409, {"error": "account already exists — sign in instead"}
+
+    # Supabase Auth is the real authority when configured — this sends the
+    # verification email and only yields a session once verified.
+    code, payload = _supabase_signup(email, password)
+    if code:
+        return code, payload
+
+    # Local development fallback (no mail service): verified immediately.
+    role = "owner" if not profiles else "trusted"
+    salt = uuid.uuid4().hex
+    profile: dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "email": email,
+        "name": (body.get("name") or "").strip(),
+        "role": role,
+        "salt": salt,
+        "password_hash": _hash_password(password, salt),
+        "created_at": _utcnow(),
+        "provider": "local",
+        "email_verified": True,
+    }
+    profiles.append(profile)
+    _save_profiles(profiles)
+
+    token = _create_session(profile["id"])
+    return 200, {"token": token, "profile": _public_profile(profile)}
+
+
+def auth_login(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    email = (body.get("email") or "").strip().lower()
+    password = body.get("password") or ""
+    if not email or not password:
+        return 400, {"error": "email and password required"}
+
+    # Supabase Auth is the real authority when configured.
+    sb_user, sb_err = _supabase_signin(email, password)
+    if sb_err == "email_unverified":
+        return 403, {"error": "Verify your email before entering DOOF.", "code": "email_unverified"}
+
+    profiles = _load_profiles()
+    profile = next((p for p in profiles if p.get("email") == email), None)
+
+    if sb_user:
+        if profile is None:
+            role = "owner" if not profiles else "trusted"
+            profile = {
+                "id": sb_user.get("id") or str(uuid.uuid4()),
+                "email": email,
+                "name": "",
+                "role": role,
+                "created_at": _utcnow(),
+                "provider": "supabase",
+                "email_verified": True,
+            }
+            profiles.append(profile)
+            _save_profiles(profiles)
+        token = _create_session(profile["id"])
+        return 200, {"token": token, "profile": _public_profile(profile)}
+
+    # Local fallback
+    if profile is None:
+        return 401, {"error": "no account found — create one first"}
+    if _hash_password(password, profile.get("salt", "")) != profile.get("password_hash"):
+        return 401, {"error": "wrong password"}
+    if profile.get("email_verified") is False:
+        return 403, {"error": "Verify your email before entering DOOF.", "code": "email_unverified"}
+    token = _create_session(profile["id"])
+    return 200, {"token": token, "profile": _public_profile(profile)}
+
+
+# ---------------------------------------------------------------------------
+# CORS / helpers
 # ---------------------------------------------------------------------------
 # CORS / helpers
 # ---------------------------------------------------------------------------
@@ -1150,6 +1501,14 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
 
+            # Current session profile
+            elif path == "/api/me":
+                _json(self, 200, {"profile": _profile_from_token(_bearer_token(self))})
+
+            # Auth capabilities (which login options to show)
+            elif path == "/api/auth/config":
+                _json(self, 200, auth_config())
+
             # Scheduler
             elif path == "/api/scheduler":
                 from doof.intelligence.scheduler import get_scheduler
@@ -1211,6 +1570,34 @@ class Handler(BaseHTTPRequestHandler):
                         "memories_used": memories_used,
                     },
                 )
+
+            # Auth
+            elif path == "/api/auth/signup":
+                code, payload = auth_signup(body)
+                _json(self, code, payload)
+
+            elif path == "/api/auth/login":
+                code, payload = auth_login(body)
+                _json(self, code, payload)
+
+            elif path == "/api/auth/resend":
+                code, payload = auth_resend((body.get("email") or "").strip().lower())
+                _json(self, code, payload)
+
+            elif path == "/api/auth/oauth":
+                code, payload = auth_oauth(body.get("access_token") or "")
+                _json(self, code, payload)
+
+            elif path == "/api/auth/logout":
+                token = _bearer_token(self)
+                if token and SESSIONS_PATH.exists():
+                    try:
+                        sessions = json.loads(SESSIONS_PATH.read_text(encoding="utf-8"))
+                        sessions = [s for s in sessions if s.get("token") != token]
+                        SESSIONS_PATH.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
+                    except Exception:
+                        pass
+                _json(self, 200, {"ok": True})
 
             # Training start
             elif path == "/api/training/start":

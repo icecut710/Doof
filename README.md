@@ -14,11 +14,13 @@ DOOF is a continuously improving local-first AI system where knowledge persists,
 
 ## Sign in
 
-Email (local alpha), or connect Supabase for Google / X later.
-
-- **First account** → Owner
-- **Friends** → Trusted Users
-- All roles share one brain, one memory, one model version stream
+- **First launch** opens a centered login window (DOOF logo + email/password).
+- "Create account" → first account is **Owner**; friends later join as **Trusted Users**.
+- **Join existing brain** lets you point at a friend's DOOF API host (LAN) to share the
+  same memory + training data + compute pool. Sessions are remembered locally.
+- Email/password is stored locally (data/profiles.json) unless **Supabase auth** is
+  configured by setting `SUPABASE_URL` + an anon key in `.env`.
+- Google / X buttons are placeholders ready for Supabase OAuth.
 
 ## What you can do
 
