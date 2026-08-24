@@ -1,6 +1,6 @@
 # DOOF v0.2 Alpha
 
-**Private collaborative AI OS** — not a chatbot wrapper.
+**Private collaborative AI OS** Not a chatbot wrapper.
 
 DOOF is a continuously improving local-first AI system where knowledge persists, training folds memory into versioned brains, and everyone connected to the same instance shares one intelligence state.
 
