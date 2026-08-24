@@ -136,13 +136,29 @@ def get_nodes() -> list[dict[str, Any]]:
 
 def upsert_node(node: dict[str, Any]) -> dict[str, Any]:
     nodes = _read(_NODES)
-    existing = next((n for n in nodes if n.get("id") == node.get("id")), None)
+    nid = node.get("id")
+    mid = node.get("machine_id")
+    existing = None
+    if nid:
+        existing = next((n for n in nodes if n.get("id") == nid), None)
+    if existing is None and mid:
+        existing = next((n for n in nodes if n.get("machine_id") == mid), None)
     if existing:
         existing.update(node)
+        existing.setdefault("id", nid or existing.get("id") or str(uuid.uuid4()))
+        node = existing
     else:
         node.setdefault("id", str(uuid.uuid4()))
         nodes.append(node)
-    _write(_NODES, nodes)
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for n in nodes:
+        i = str(n.get("id") or "")
+        if not i or i in seen:
+            continue
+        seen.add(i)
+        out.append(n)
+    _write(_NODES, out)
     return node
 
 
@@ -340,17 +356,24 @@ def delete_training_job(job_id: str) -> bool:
 
 def get_online_nodes() -> list[dict[str, Any]]:
     """Return nodes that have sent a heartbeat within the last 60s."""
+    try:
+        from doof.compute.scheduler import is_stale
+    except Exception:
+        is_stale = None  # type: ignore
     now = time.time()
     nodes = _read(_NODES)
     online = []
     for n in nodes:
-        last_seen = n.get("last_seen")
-        if isinstance(last_seen, (int, float)):
-            if now - last_seen <= 60:
-                n_copy = dict(n)
-                n_copy["status"] = "online"
-                online.append(n_copy)
-        elif n.get("is_local"):
+        fresh = False
+        if is_stale is not None:
+            fresh = n.get("is_local") or not is_stale(n)
+        else:
+            last_seen = n.get("last_seen")
+            if isinstance(last_seen, (int, float)) and now - last_seen <= 60:
+                fresh = True
+            elif n.get("is_local"):
+                fresh = True
+        if fresh:
             n_copy = dict(n)
             n_copy["status"] = "online"
             online.append(n_copy)
@@ -363,3 +386,65 @@ def get_strongest_online_worker() -> dict[str, Any] | None:
     if not online:
         return None
     return sorted(online, key=lambda n: n.get("vram_gb", 0), reverse=True)[0]
+
+
+# ---------------------------------------------------------------------------
+# COMPUTE JOBS (inference / embeddings — typed, never arbitrary code)
+# ---------------------------------------------------------------------------
+
+_COMPUTE = DATA / "compute_jobs.json"
+
+
+def get_compute_jobs(
+    *,
+    status: str | None = None,
+    worker_id: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    items = _read(_COMPUTE)
+    if status:
+        items = [j for j in items if j.get("status") == status]
+    if worker_id:
+        items = [
+            j
+            for j in items
+            if j.get("worker_node") == worker_id or j.get("worker") == worker_id
+        ]
+    items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return items[:limit]
+
+
+def insert_compute_job(record: dict[str, Any]) -> dict[str, Any]:
+    items = _read(_COMPUTE)
+    record.setdefault("id", str(uuid.uuid4()))
+    record.setdefault("created_at", _now())
+    record.setdefault("status", "queued")
+    record.setdefault("priority", 5)
+    record.setdefault("payload", {})
+    record.setdefault("attempts", 0)
+    items.append(record)
+    _write(_COMPUTE, items)
+    return record
+
+
+def update_compute_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
+    items = _read(_COMPUTE)
+    rec = next((j for j in items if j.get("id") == job_id), None)
+    if rec is None:
+        return None
+    rec.update(fields)
+    _write(_COMPUTE, items)
+    return rec
+
+
+def claim_compute_job(job_id: str, worker_id: str) -> dict[str, Any] | None:
+    items = _read(_COMPUTE)
+    rec = next((j for j in items if j.get("id") == job_id), None)
+    if rec is None or rec.get("status") != "queued":
+        return None
+    rec["status"] = "running"
+    rec["worker_node"] = worker_id
+    rec["started_at"] = _now()
+    rec["attempts"] = int(rec.get("attempts") or 0) + 1
+    _write(_COMPUTE, items)
+    return rec

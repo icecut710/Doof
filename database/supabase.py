@@ -19,9 +19,12 @@ from __future__ import annotations
 
 import json
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 import time
 from typing import Any
 from urllib.request import Request, urlopen
@@ -315,3 +318,55 @@ def get_strongest_online_worker() -> dict[str, Any] | None:
     if not online:
         return None
     return sorted(online, key=lambda n: n.get("vram_gb", 0), reverse=True)[0]
+
+
+def get_compute_jobs(
+    *,
+    status: str | None = None,
+    worker_id: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    params = [f"limit={limit}"]
+    if status:
+        params.append(f"status=eq.{status}")
+    if worker_id:
+        params.append(f"worker_node=eq.{worker_id}")
+    q = "order=created_at.desc&" + "&".join(params)
+    try:
+        return _get("compute_jobs", q)
+    except Exception:
+        return []
+
+
+def insert_compute_job(record: dict[str, Any]) -> dict[str, Any]:
+    return _post("compute_jobs", record)
+
+
+def update_compute_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
+    try:
+        data = _patch("compute_jobs", job_id, fields)
+        return data if isinstance(data, dict) and data else None
+    except Exception:
+        return None
+
+
+def claim_compute_job(job_id: str, worker_id: str) -> dict[str, Any] | None:
+    url = f"{_URL}/rest/v1/compute_jobs?id=eq.{job_id}&status=eq.queued"
+    body = json.dumps(
+        {
+            "status": "running",
+            "worker_node": worker_id,
+            "started_at": _now_iso(),
+        }
+    ).encode()
+    h = _headers()
+    h["Prefer"] = "return=representation"
+    req = Request(url, data=body, headers=h, method="PATCH")
+    try:
+        with urlopen(req, timeout=_TIMEOUT) as resp:
+            result = json.loads(resp.read())
+            if isinstance(result, list) and result:
+                return result[0]
+    except URLError:
+        pass
+    return None

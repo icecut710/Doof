@@ -17,8 +17,13 @@ from types import ModuleType
 
 def get_db() -> ModuleType:
     """Return the active database adapter module."""
-    url = os.environ.get("SUPABASE_URL", "")
-    key = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_ANON_KEY", "")
+    url = os.environ.get("SUPABASE_URL") or os.environ.get("DOOF_SUPABASE_URL") or ""
+    key = (
+        os.environ.get("SUPABASE_SERVICE_KEY")
+        or os.environ.get("SUPABASE_ANON_KEY")
+        or os.environ.get("DOOF_SUPABASE_ANON_KEY")
+        or ""
+    )
     if url and key:
         from database import supabase as _db  # type: ignore
     else:

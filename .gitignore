@@ -30,3 +30,7 @@ frontend/Doof/
 # keep doof_v01.pt optional; large — prefer train locally
 data/profiles.json
 data/sessions.json
+data/machine_id.txt
+data/compute_jobs.json
+data/compute_settings.json
+

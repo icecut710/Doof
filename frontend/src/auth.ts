@@ -13,7 +13,13 @@ const TOKEN_KEY = "doof_token";
 export const SERVER_KEY = "doof_server";
 
 export function getServer(): string {
-  return localStorage.getItem(SERVER_KEY) || "http://127.0.0.1:8765";
+  const stored = localStorage.getItem(SERVER_KEY);
+  if (stored) return stored;
+  if (typeof window !== "undefined") {
+    const port = window.location.port;
+    if (port === "8766" || port === "3000") return "http://127.0.0.1:8765";
+  }
+  return "";
 }
 
 export function setServer(url: string) {
