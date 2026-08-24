@@ -1,8 +1,4 @@
-"""Wrap Handler.do_GET / do_POST so /api/updates, /api/admin, /api/device are live.
-
-Also rebinds legacy memory-only helpers so they cannot return the universal
-"I do not have that in memory yet" refusal.
-"""
+"""Wrap Handler routes + install pool/memory patches."""
 from __future__ import annotations
 
 _installed = False
@@ -20,13 +16,19 @@ def install() -> None:
         print(f"[api_mount] skip: {e}")
         return
 
-    # Kill the dead universal memory refusal if anything still calls it.
     try:
         api_mod._answer_from_memory = (  # type: ignore[attr-defined]
             lambda prompt, memories=None: lightweight_answer(prompt, memories or [])
         )
     except Exception:
         pass
+
+    try:
+        from doof.compute.pool_patch import install as patch_pool
+
+        patch_pool()
+    except Exception as e:
+        print(f"[api_mount] pool_patch: {e}")
 
     Handler = getattr(api_mod, "Handler", None)
     if Handler is None:
@@ -72,4 +74,4 @@ def install() -> None:
     Handler.do_GET = do_GET  # type: ignore[method-assign]
     Handler.do_POST = do_POST  # type: ignore[method-assign]
     _installed = True
-    print("[api_mount] updates + admin + device routes mounted; memory refusal rebound")
+    print("[api_mount] routes + patches installed")
