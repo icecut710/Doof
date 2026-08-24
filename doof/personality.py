@@ -142,6 +142,8 @@ def boot_copy(phase: str) -> tuple[str, str]:
     lines = _LINES["loading"]
     if phase == "failed":
         return _LINES["offline"][0]
+    if phase == "ready":
+        return _LINES["healthy"][0]
     if phase in order:
         return lines[min(order.index(phase), len(lines) - 1)]
     return pick(mapping.get(phase, "loading"))
