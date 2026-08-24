@@ -1,9 +1,40 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for DOOF v0.2 Alpha — Windows EXE."""
+"""PyInstaller onedir spec for DOOF v0.2 — friend-ready Windows EXE.
+
+Output:
+  dist/DOOF/DOOF.exe
+  dist/DOOF/_internal/...
+
+Build (from repo root, on Windows):
+  packaging\\build.bat
+  or:  python packaging/build_exe.py
+"""
 
 from pathlib import Path
 
-ROOT = Path(SPECPATH).parent
+ROOT = Path(SPECPATH).resolve().parent.parent
+
+def _datas():
+    items = []
+    pairs = [
+        (ROOT / "frontend" / "dist", "frontend/dist"),
+        (ROOT / "assets", "assets"),
+        (ROOT / "checkpoints", "checkpoints"),
+        (ROOT / "database", "database"),
+    ]
+    data_dir = ROOT / "data"
+    if data_dir.is_dir():
+        pairs.append((data_dir, "data_seed"))
+
+    env_example = ROOT / ".env.example"
+    if env_example.is_file():
+        pairs.append((env_example, "."))
+
+    for src, dest in pairs:
+        if src.exists():
+            items.append((str(src), dest))
+    return items
+
 
 block_cipher = None
 
@@ -11,13 +42,11 @@ a = Analysis(
     [str(ROOT / "doof" / "__main__.py")],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[
-        (str(ROOT / "frontend" / "dist"), "frontend/dist"),
-        (str(ROOT / "assets"), "assets"),
-    ],
+    datas=_datas(),
     hiddenimports=[
         "doof",
         "doof.api",
+        "doof.paths",
         "doof.gui",
         "doof.gui.app",
         "doof.gui.main_window",
@@ -41,14 +70,32 @@ a = Analysis(
         "PySide6.QtCore",
         "PySide6.QtGui",
         "PySide6.QtWidgets",
+        "PySide6.QtWebEngineCore",
         "PySide6.QtWebEngineWidgets",
+        "PySide6.QtNetwork",
+        "PySide6.QtPrintSupport",
+        "shiboken6",
         "torch",
         "tqdm",
+        "http.server",
+        "json",
+        "hashlib",
+        "uuid",
+        "threading",
+        "socket",
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib"],
+    excludes=[
+        "tkinter",
+        "matplotlib",
+        "scipy",
+        "pandas",
+        "IPython",
+        "notebook",
+        "pytest",
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -56,6 +103,10 @@ a = Analysis(
 )
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+_icon = ROOT / "assets" / "doof.ico"
+if not _icon.is_file():
+    _icon = ROOT / "assets" / "doof_icon.ico"
 
 exe = EXE(
     pyz,
@@ -66,14 +117,14 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(ROOT / "assets" / "doof_icon.ico"),
+    icon=str(_icon) if _icon.is_file() else None,
 )
 
 coll = COLLECT(
@@ -82,7 +133,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="DOOF",
 )
