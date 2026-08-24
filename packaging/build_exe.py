@@ -4,7 +4,7 @@ Run from the project root:
 
     python packaging/build_exe.py
     # or double-click / run:
-    packaging\build.bat
+    packaging\\build.bat
 
 Pipeline (ALWAYS in this order):
   1. npm install + production frontend build  →  frontend/dist/index.html
@@ -33,11 +33,32 @@ def run(cmd: list[str] | str, cwd: Path | None = None, shell: bool = False) -> N
         sys.exit(r.returncode)
 
 
+def _ensure_app_tsx() -> None:
+    """If App.tsx was corrupted/placeholder, restore the music-integrated UI."""
+    app = ROOT / "frontend" / "src" / "App.tsx"
+    restore = ROOT / "scripts" / "restore_music_app.py"
+    if not app.is_file():
+        return
+    text = app.read_text(encoding="utf-8", errors="replace").strip()
+    if text == "PLACEHOLDER" or len(text) < 500:
+        if restore.is_file():
+            print("[build] Restoring frontend/src/App.tsx via scripts/restore_music_app.py …")
+            r = subprocess.run([sys.executable, str(restore)], cwd=str(ROOT))
+            if r.returncode != 0:
+                print("[build] ERROR: could not restore App.tsx")
+                sys.exit(1)
+        else:
+            print("[build] ERROR: App.tsx is invalid and restore script is missing")
+            sys.exit(1)
+
+
 def build_frontend() -> None:
     frontend = ROOT / "frontend"
     if not (frontend / "package.json").is_file():
         print("[build] ERROR: frontend/package.json missing")
         sys.exit(1)
+
+    _ensure_app_tsx()
 
     print("\n========== 1/4  FRONTEND PRODUCTION BUILD ==========")
     print("[build] npm install…")
