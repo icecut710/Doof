@@ -8,8 +8,13 @@ GET  /api/model
 GET  /api/checkpoints
 GET  /api/models/versions
 GET  /api/training
+GET  /api/training/jobs
+GET  /api/approved_examples
+GET  /api/approved_examples/count
+GET  /api/network
 GET  /api/settings
 GET  /api/cloud
+GET  /api/knowledge
 GET  /api/memory
 GET  /api/feedback
 GET  /api/nodes
@@ -19,6 +24,8 @@ POST /api/generate
 POST /api/training/start
 POST /api/training/stop
 POST /api/training/build_dataset
+POST /api/training/jobs
+POST /api/training/jobs/{id}/cancel
 POST /api/model/load
 POST /api/reload
 POST /api/settings
@@ -26,12 +33,15 @@ POST /api/knowledge          (legacy compat)
 POST /api/memory
 POST /api/memory/{id}/approve
 POST /api/feedback
+POST /api/feedback/{id}/approve
 POST /api/nodes/register
 POST /api/nodes/heartbeat
 POST /api/models/promote
+POST /api/approved_examples
 
 DELETE /api/memory/{id}
 DELETE /api/nodes/{id}
+DELETE /api/approved_examples/{id}
 """
 from __future__ import annotations
 
@@ -47,6 +57,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from database import get_db
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -57,9 +69,13 @@ DATA_DIR = ROOT / "data"
 TRAIN = DATA_DIR / "train.txt"
 KNOW = DATA_DIR / "knowledge.json"
 SETT = DATA_DIR / "settings.json"
-FEEDBACK_PATH = DATA_DIR / "feedback.json"
 NODES_PATH = DATA_DIR / "nodes.json"
 VERSIONS_PATH = DATA_DIR / "brain_versions.json"
+
+# Heartbeat thread interval (seconds)
+_HEARTBEAT_INTERVAL = 30
+# How long before a node is considered stale (seconds)
+_NODE_TIMEOUT = 60
 
 # ---------------------------------------------------------------------------
 # State
@@ -87,6 +103,9 @@ _settings = {
     "top_k": 50,
     "context_length": 64,
 }
+
+# Local node identity (set on first registration / heartbeat)
+_local_node_id: str | None = None
 
 # ---------------------------------------------------------------------------
 # CORS / helpers
@@ -117,6 +136,16 @@ def _body(h: BaseHTTPRequestHandler) -> dict[str, Any]:
         return json.loads(h.rfile.read(n))
     except Exception:
         return {}
+
+
+# ---------------------------------------------------------------------------
+# Database adapter proxy
+# ---------------------------------------------------------------------------
+
+
+def _db():
+    """Return the active database adapter (Supabase or local JSON)."""
+    return get_db()
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +244,11 @@ def model_info() -> dict[str, Any]:
 
 def list_ckpts() -> list[dict[str, Any]]:
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
-    versions = _load_versions()
+    db = _db()
+    try:
+        versions = db.get_versions()
+    except Exception:
+        versions = []
     version_map = {v["checkpoint_name"]: v for v in versions}
     out = []
     for p in sorted(CKPT_DIR.glob("*.pt")):
@@ -226,7 +259,6 @@ def list_ckpts() -> list[dict[str, Any]]:
             "mtime": p.stat().st_mtime,
             "loaded": _loaded == str(p),
         }
-        # Version metadata
         vinfo = version_map.get(p.name, {})
         m["version_label"] = vinfo.get("label")
         m["status"] = vinfo.get("status", "archived")
@@ -250,19 +282,27 @@ def list_ckpts() -> list[dict[str, Any]]:
 
 
 def _load_versions() -> list[dict[str, Any]]:
-    if VERSIONS_PATH.exists():
-        try:
-            return json.loads(VERSIONS_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return []
+    """Load brain versions from the active database adapter."""
+    db = _db()
+    try:
+        return db.get_versions()
+    except Exception:
+        if VERSIONS_PATH.exists():
+            try:
+                return json.loads(VERSIONS_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return []
 
 
 def _save_versions(versions: list[dict[str, Any]]) -> None:
-    VERSIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    VERSIONS_PATH.write_text(
-        json.dumps(versions, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    """Persist brain versions via the database adapter."""
+    db = _db()
+    for v in versions:
+        try:
+            db.insert_version(v)
+        except Exception:
+            pass
 
 
 def promote_checkpoint(
@@ -270,37 +310,75 @@ def promote_checkpoint(
     label: str,
     promoted_by: str = "system",
 ) -> dict[str, Any]:
-    """Mark a checkpoint as production, demoting any current production."""
+    """Mark a checkpoint as production, demoting any current production.
+
+    **Never auto-promote without evaluation.**  If the checkpoint's brain
+    version record has no evaluation, the promotion will still succeed but
+    the version is flagged with ``eval_passed=None``.
+    """
     versions = _load_versions()
+    db = _db()
     # Demote current production
+    new_versions = []
     for v in versions:
         if v.get("status") == "production":
-            v["status"] = "archived"
+            try:
+                db.update_version(v["id"], status="archived",
+                                  promoted_at=v.get("promoted_at"))
+            except Exception:
+                v["status"] = "archived"
+            new_versions.append(v)
+        else:
+            new_versions.append(v)
+
     # Find or create entry
-    for v in versions:
-        if v.get("checkpoint_name") == checkpoint_name:
-            v.update(
-                {
-                    "label": label,
-                    "status": "production",
-                    "promoted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "promoted_by": promoted_by,
-                }
+    existing = next(
+        (v for v in new_versions if v.get("checkpoint_name") == checkpoint_name),
+        None,
+    )
+    promoted_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if existing:
+        try:
+            db.update_version(
+                existing["id"],
+                label=label,
+                status="production",
+                promoted_at=promoted_at,
+                promoted_by=promoted_by,
             )
-            break
+        except Exception:
+            pass
+        existing.update({
+            "label": label,
+            "status": "production",
+            "promoted_at": promoted_at,
+            "promoted_by": promoted_by,
+        })
     else:
-        versions.append(
-            {
-                "id": str(uuid.uuid4()),
-                "checkpoint_name": checkpoint_name,
-                "label": label,
-                "status": "production",
-                "promoted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "promoted_by": promoted_by,
-            }
-        )
-    _save_versions(versions)
-    return {"ok": True, "checkpoint": checkpoint_name, "label": label}
+        record = {
+            "id": str(uuid.uuid4()),
+            "checkpoint_name": checkpoint_name,
+            "label": label,
+            "status": "production",
+            "promoted_at": promoted_at,
+            "promoted_by": promoted_by,
+            "created_at": promoted_at,
+        }
+        try:
+            db.insert_version(record)
+        except Exception:
+            pass
+        versions.append(record)
+        existing = record
+
+    # Force reload of inference
+    global _inf, _loaded
+    with _lock:
+        _inf = None
+        _loaded = None
+
+    return {"ok": True, "checkpoint": checkpoint_name, "label": label,
+            "eval_passed": existing.get("eval_passed")}
 
 
 # ---------------------------------------------------------------------------
@@ -347,20 +425,29 @@ def _get_store():
 
 
 def _load_feedback() -> list[dict[str, Any]]:
-    if FEEDBACK_PATH.exists():
-        try:
-            data = json.loads(FEEDBACK_PATH.read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
-        except Exception:
-            pass
-    return []
+    """Load feedback from the active database adapter."""
+    db = _db()
+    try:
+        return db.get_feedback()
+    except Exception:
+        feedback_path = DATA_DIR / "feedback.json"
+        if feedback_path.exists():
+            try:
+                data = json.loads(feedback_path.read_text(encoding="utf-8"))
+                return data if isinstance(data, list) else []
+            except Exception:
+                pass
+        return []
 
 
 def _save_feedback(items: list[dict[str, Any]]) -> None:
-    FEEDBACK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    FEEDBACK_PATH.write_text(
-        json.dumps(items, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    """Persist feedback via the database adapter."""
+    db = _db()
+    for item in items:
+        try:
+            db.insert_feedback(item)
+        except Exception:
+            pass
 
 
 def add_feedback(
@@ -372,7 +459,7 @@ def add_feedback(
     memories_used: list | None = None,
 ) -> dict[str, Any]:
     from doof.intelligence.quality import score_response
-    items = _load_feedback()
+    db = _db()
     item: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "prompt": prompt,
@@ -387,9 +474,64 @@ def add_feedback(
     quality = score_response(prompt, correction or response, rating=rating)
     item["quality"] = quality["total"]
     item["training_ready"] = quality["training_ready"]
-    items.append(item)
-    _save_feedback(items)
+    try:
+        db.insert_feedback(item)
+    except Exception:
+        _save_feedback(_load_feedback() + [item])
     return item
+
+
+def approve_feedback(feedback_id: str, approved_by: str = "local") -> dict[str, Any] | None:
+    """Promote an approved feedback item into the ``approved_examples`` table.
+
+    This is the **only** sanctioned path from raw conversation feedback to
+    training data.  The original feedback is *not* trained on directly.
+    """
+    db = _db()
+    feedback_items = _load_feedback()
+    fb = next((f for f in feedback_items if f.get("id") == feedback_id), None)
+    if fb is None:
+        return None
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    example: dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "prompt": fb.get("prompt", ""),
+        "response": fb.get("correction") or fb.get("response", ""),
+        "rating": fb.get("rating", "good"),
+        "correction": fb.get("correction", ""),
+        "quality": fb.get("quality", 0),
+        "training_ready": fb.get("training_ready", True),
+        "approved": True,
+        "approved_at": now,
+        "approved_by": approved_by,
+        "created_by": fb.get("created_by", "local"),
+        "created_at": fb.get("created_at", now),
+        "source": "feedback",
+        "memory_ids": fb.get("memories_used", []),
+    }
+    try:
+        result = db.insert_approved_example(example)
+        # Mark the original feedback as approved (but NOT automatically
+        # training-ready — it still needs quality scoring)
+        db.update_feedback(feedback_id, approved=True)
+        result["source_feedback_id"] = feedback_id
+        return result
+    except Exception:
+        # Local fallback
+        examples_path = DATA_DIR / "approved_examples.json"
+        examples = []
+        if examples_path.exists():
+            try:
+                examples = json.loads(examples_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        examples.append(example)
+        examples_path.write_text(
+            json.dumps(examples, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        example["source_feedback_id"] = feedback_id
+        return example
 
 
 # ---------------------------------------------------------------------------
@@ -398,26 +540,40 @@ def add_feedback(
 
 
 def _load_nodes() -> list[dict[str, Any]]:
-    if NODES_PATH.exists():
-        try:
-            data = json.loads(NODES_PATH.read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
-        except Exception:
-            pass
-    return []
+    """Load nodes from the active database adapter."""
+    db = _db()
+    try:
+        return db.get_nodes()
+    except Exception:
+        if NODES_PATH.exists():
+            try:
+                data = json.loads(NODES_PATH.read_text(encoding="utf-8"))
+                return data if isinstance(data, list) else []
+            except Exception:
+                pass
+        return []
 
 
 def _save_nodes(nodes: list[dict[str, Any]]) -> None:
-    NODES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    NODES_PATH.write_text(
-        json.dumps(nodes, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    """Persist nodes via the database adapter (upsert each)."""
+    db = _db()
+    for n in nodes:
+        try:
+            db.upsert_node(n)
+        except Exception:
+            pass
 
 
 def get_nodes_with_local() -> list[dict[str, Any]]:
     """Return all nodes, auto-updating the local node entry from hardware()."""
+    global _local_node_id
     hw = hardware()
-    nodes = _load_nodes()
+    db = _db()
+
+    try:
+        nodes = db.get_nodes()
+    except Exception:
+        nodes = []
 
     # Check if local node exists
     local_id = "local"
@@ -449,21 +605,55 @@ def get_nodes_with_local() -> list[dict[str, Any]]:
     }
 
     if local_node:
-        local_node.update(local_data)
+        # Update last_seen for local node
+        try:
+            db.update_node(local_id, **local_data)
+        except Exception:
+            local_node.update(local_data)
     else:
-        nodes.insert(0, local_data)
-
-    _save_nodes(nodes)
+        try:
+            db.upsert_node(local_data)
+        except Exception:
+            nodes.insert(0, local_data)
+    _local_node_id = local_id
 
     # Mark stale nodes as offline (no heartbeat for 60s)
     for node in nodes:
         if node.get("id") == local_id:
             continue
         last = node.get("last_seen", 0)
-        if isinstance(last, (int, float)) and (now_ts - last) > 60:
+        if isinstance(last, (int, float)) and (now_ts - last) > _NODE_TIMEOUT:
             node["status"] = "offline"
+            try:
+                db.update_node(node["id"], status="offline")
+            except Exception:
+                pass
+
+    # Re-fetch to get updated state
+    try:
+        nodes = db.get_nodes()
+        # Ensure local node is present with current data
+        for n in nodes:
+            if n.get("id") == local_id:
+                n.update(local_data)
+                break
+        else:
+            nodes.insert(0, local_data)
+    except Exception:
+        pass
 
     return nodes
+
+
+def _mark_local_node_training(training: bool) -> None:
+    """Update the local node's training_active flag."""
+    global _local_node_id
+    if _local_node_id:
+        db = _db()
+        try:
+            db.update_node(_local_node_id, training_active=training)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +697,7 @@ def run_train(epochs: int = 3, resume_from: str | None = None) -> None:
 
         with _lock:
             _train.update({"running": True, "message": "training", "history": []})
+        _mark_local_node_training(True)
 
         total_steps = cfg.epochs * 100
         t_start = time.time()
@@ -561,7 +752,6 @@ def run_train(epochs: int = 3, resume_from: str | None = None) -> None:
                     tr.save_checkpoint(step, loss_val)
 
         tr.save_checkpoint(step, loss_val)
-        import torch
         torch.save(
             {
                 "model_state_dict": tr.model.state_dict(),
@@ -575,6 +765,21 @@ def run_train(epochs: int = 3, resume_from: str | None = None) -> None:
             },
             CKPT_DIR / "doof_v01.pt",
         )
+
+        # Register brain version after training (as candidate, not production)
+        db = _db()
+        versions = _load_versions()
+        label = f"v{len(versions) + 1}.0.0-candidate"
+        try:
+            db.insert_version({
+                "checkpoint_name": "doof_v01.pt",
+                "label": label,
+                "status": "candidate",
+                "promoted_by": "local",
+            })
+        except Exception:
+            pass
+
         with _lock:
             _inf = None
             _loaded = None
@@ -587,6 +792,7 @@ def run_train(epochs: int = 3, resume_from: str | None = None) -> None:
                     "eta_seconds": None,
                 }
             )
+        _mark_local_node_training(False)
     except Exception as e:
         with _lock:
             _train.update(
@@ -596,6 +802,7 @@ def run_train(epochs: int = 3, resume_from: str | None = None) -> None:
                     "error": traceback.format_exc(),
                 }
             )
+        _mark_local_node_training(False)
 
 
 # ---------------------------------------------------------------------------
@@ -604,29 +811,197 @@ def run_train(epochs: int = 3, resume_from: str | None = None) -> None:
 
 
 def training_stats() -> dict[str, Any]:
-    """Return enriched training status."""
-    feedback = _load_feedback()
+    """Return enriched training status including job queue and worker pool."""
+    db = _db()
+
+    # Feedback stats
+    try:
+        feedback = db.get_feedback()
+    except Exception:
+        feedback = []
     approved = [f for f in feedback if f.get("approved")]
     training_ready = [f for f in feedback if f.get("training_ready")]
 
+    # Approved examples counts
+    try:
+        ex_counts = db.count_approved_examples()
+    except Exception:
+        ex_counts = {"total": 0, "approved": 0, "training_ready": 0}
+
+    # Memory stats
     store = _get_store()
     mem_stats = store.stats()
 
+    # Brain versions
     versions = _load_versions()
     production = next(
         (v for v in reversed(versions) if v.get("status") == "production"), None
     )
 
+    # Training jobs queue
+    try:
+        queued_jobs = db.get_training_jobs(status="queued")
+        running_jobs = db.get_training_jobs(status="running")
+    except Exception:
+        queued_jobs = []
+        running_jobs = []
+
+    # Online nodes / workers
+    try:
+        online_nodes = db.get_online_nodes()
+    except Exception:
+        online_nodes = []
+    workers_online = len(online_nodes)
+
     with _lock:
         state = dict(_train)
 
-    state["approved_examples"] = len(approved)
-    state["training_ready_examples"] = len(training_ready)
+    state["approved_examples"] = ex_counts.get("approved", len(approved))
+    state["training_ready_examples"] = ex_counts.get("training_ready", len(training_ready))
     state["total_feedback"] = len(feedback)
     state["memory_count"] = mem_stats["approved"]
     state["brain_version"] = production.get("label") if production else "1.0.0"
     state["production_checkpoint"] = production.get("checkpoint_name") if production else None
+    state["training_queue"] = [
+        {
+            "id": j.get("id"),
+            "type": j.get("type", "train"),
+            "priority": j.get("priority", 5),
+            "created_at": j.get("created_at"),
+            "payload": j.get("payload"),
+            "assigned_worker": j.get("worker"),
+        }
+        for j in queued_jobs
+    ]
+    state["running_jobs"] = [
+        {
+            "id": j.get("id"),
+            "step": j.get("step"),
+            "epoch": j.get("epoch"),
+            "total_epochs": j.get("total_epochs"),
+            "loss": j.get("loss"),
+            "worker": j.get("worker"),
+        }
+        for j in running_jobs
+    ]
+    state["workers_online"] = workers_online
+    state["examples_count"] = ex_counts.get("total", len(approved))
+    state["online_nodes"] = [
+        {
+            "id": n.get("id"),
+            "name": n.get("name"),
+            "gpu": n.get("gpu"),
+            "vram_gb": n.get("vram_gb"),
+            "status": n.get("status", "online"),
+            "is_local": n.get("is_local", False),
+            "training_active": n.get("training_active", False),
+        }
+        for n in online_nodes
+    ]
     return state
+
+
+# ---------------------------------------------------------------------------
+# Training jobs (distributed compute queue)
+# ---------------------------------------------------------------------------
+
+
+def get_training_jobs_api(*, status: str | None = None, limit: int = 50) -> list[dict]:
+    db = _db()
+    try:
+        return db.get_training_jobs(status=status, limit=limit)
+    except Exception:
+        return []
+
+
+def create_training_job(
+    body: dict[str, Any], created_by: str = "local"
+) -> dict[str, Any]:
+    """Create a training job and assign it to the strongest online worker."""
+    from doof.intelligence.scheduler import assign_training_job
+
+    payload = {
+        "epochs": int(body.get("epochs", 3)),
+        "seq_len": int(body.get("seq_len", 64)),
+        "batch_size": int(body.get("batch_size", 8)),
+        "learning_rate": float(body.get("learning_rate", 3e-4)),
+        "resume_from": body.get("resume_from"),
+        "dataset_version": body.get("dataset_version"),
+    }
+    priority = int(body.get("priority", 5))
+    return assign_training_job(payload=payload, priority=priority,
+                               created_by=created_by)
+
+
+def cancel_training_job(job_id: str) -> bool:
+    db = _db()
+    try:
+        return bool(db.update_training_job(job_id, status="cancelled"))
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Approved examples API
+# ---------------------------------------------------------------------------
+
+
+def get_approved_examples_api(
+    *, approved_only: bool = True, limit: int = 500
+) -> list[dict]:
+    db = _db()
+    try:
+        return db.get_approved_examples(
+            approved_only=approved_only, training_ready_only=False, limit=limit
+        )
+    except Exception:
+        return []
+
+
+def add_approved_example(body: dict[str, Any]) -> dict[str, Any]:
+    db = _db()
+    record = {
+        "prompt": (body.get("prompt") or "").strip(),
+        "response": (body.get("response") or "").strip(),
+        "rating": body.get("rating", "good"),
+        "correction": body.get("correction", ""),
+        "quality": body.get("quality"),
+        "training_ready": body.get("training_ready", True),
+        "approved": body.get("approved", True),
+        "created_by": body.get("created_by", "local"),
+        "source": body.get("source", "manual"),
+        "memory_ids": body.get("memory_ids") or [],
+    }
+    if not record["prompt"] or not record["response"]:
+        raise ValueError("prompt and response required")
+    try:
+        return db.insert_approved_example(record)
+    except Exception:
+        # Local fallback
+        examples_path = DATA_DIR / "approved_examples.json"
+        examples = []
+        if examples_path.exists():
+            try:
+                examples = json.loads(examples_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        record.setdefault("id", str(uuid.uuid4()))
+        record.setdefault("created_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        record.setdefault("approved_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        record.setdefault("approved_by", record["created_by"])
+        examples.append(record)
+        examples_path.write_text(
+            json.dumps(examples, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return record
+
+
+def delete_approved_example_api(example_id: str) -> bool:
+    db = _db()
+    try:
+        return db.delete_approved_example(example_id)
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +1044,43 @@ class Handler(BaseHTTPRequestHandler):
             # Training status (enriched)
             elif path == "/api/training":
                 _json(self, 200, training_stats())
+
+            # Training jobs queue
+            elif path == "/api/training/jobs":
+                _json(self, 200, {"jobs": get_training_jobs_api()})
+
+            # Approved examples
+            elif path == "/api/approved_examples":
+                approved_only = urlparse(self.path).query.lower() != "approved=false"
+                _json(self, 200, {"examples": get_approved_examples_api(approved_only=approved_only)})
+
+            # Approved examples count
+            elif path == "/api/approved_examples/count":
+                db = _db()
+                try:
+                    counts = db.count_approved_examples()
+                except Exception:
+                    counts = {"total": 0, "approved": 0, "training_ready": 0}
+                _json(self, 200, counts)
+
+            # Network summary (connected users / GPU / VRAM / status)
+            elif path == "/api/network":
+                nodes = get_nodes_with_local()
+                online = [n for n in nodes if n.get("status") == "online"]
+                total_vram = sum(n.get("vram_gb", 0) or 0 for n in online)
+                connected_users = sum(1 for n in online if not n.get("is_local")) + 1  # +1 for local
+                _json(
+                    self,
+                    200,
+                    {
+                        "nodes": nodes,
+                        "nodes_online": len(online),
+                        "connected_users": connected_users,
+                        "total_vram_gb": round(total_vram, 1),
+                        "training_active": any(n.get("training_active") for n in online),
+                        "workers_online": len(online),
+                    },
+                )
 
             # Settings
             elif path == "/api/settings":
@@ -724,7 +1136,7 @@ class Handler(BaseHTTPRequestHandler):
             # Nodes
             elif path == "/api/nodes":
                 nodes = get_nodes_with_local()
-                total_vram = sum(n.get("vram_gb", 0) for n in nodes if n.get("status") == "online")
+                total_vram = sum(n.get("vram_gb", 0) or 0 for n in nodes if n.get("status") == "online")
                 online = [n for n in nodes if n.get("status") == "online"]
                 _json(
                     self,
@@ -732,6 +1144,7 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "nodes": nodes,
                         "nodes_online": len(online),
+                        "connected_users": len(online),
                         "total_vram_gb": round(total_vram, 1),
                         "training_active": any(n.get("training_active") for n in online),
                     },
@@ -833,6 +1246,17 @@ class Handler(BaseHTTPRequestHandler):
                     _train["dataset_version"] = result.get("version")
                 _json(self, 200, result)
 
+            # Create training job (distributed)
+            elif path == "/api/training/jobs":
+                job = create_training_job(body)
+                _json(self, 201, {"ok": True, "job": job})
+
+            # Cancel training job
+            elif re.match(r"^/api/training/jobs/[^/]+/cancel$", path):
+                job_id = path.split("/")[4]
+                ok = cancel_training_job(job_id)
+                _json(self, 200, {"ok": ok, "cancelled": job_id})
+
             # Knowledge (legacy)
             elif path == "/api/knowledge":
                 if "items" in body:
@@ -894,48 +1318,78 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 _json(self, 201, {"ok": True, "feedback": item})
 
+            # Approve feedback → move to approved_examples
+            elif re.match(r"^/api/feedback/[^/]+/approve$", path):
+                fb_id = path.split("/")[3]
+                result = approve_feedback(fb_id, approved_by=body.get("approved_by", "local"))
+                if result:
+                    _json(self, 200, {"ok": True, "example": result})
+                else:
+                    _json(self, 404, {"error": "feedback not found"})
+
             # Node register
             elif path == "/api/nodes/register":
                 name = (body.get("name") or platform.node() or "Unknown").strip()
+                db = _db()
                 nodes = _load_nodes()
-                # Check if already registered by name
+                now_ts = time.time()
                 existing = next((n for n in nodes if n.get("name") == name), None)
-                now = time.time()
+
+                node_data: dict[str, Any] = {
+                    "name": name,
+                    "gpu": body.get("gpu", "Unknown GPU"),
+                    "vram_gb": float(body.get("vram_gb", 0)),
+                    "device": body.get("device", "cpu"),
+                    "cuda_available": body.get("cuda_available", False),
+                    "platform": body.get("platform", platform.system()),
+                    "torch_version": body.get("torch_version"),
+                    "status": "online",
+                    "last_seen": now_ts,
+                    "is_local": body.get("is_local", False),
+                    "training_active": body.get("training_active", False),
+                }
+
                 if existing:
-                    existing.update({
-                        "gpu": body.get("gpu", existing.get("gpu")),
-                        "vram_gb": body.get("vram_gb", existing.get("vram_gb")),
-                        "status": "online",
-                        "last_seen": now,
-                    })
-                else:
-                    node: dict[str, Any] = {
-                        "id": str(uuid.uuid4()),
-                        "name": name,
-                        "gpu": body.get("gpu", "Unknown GPU"),
-                        "vram_gb": float(body.get("vram_gb", 0)),
-                        "device": body.get("device", "cpu"),
-                        "status": "online",
-                        "registered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                        "last_seen": now,
-                        "is_local": False,
-                        "training_active": False,
-                    }
-                    nodes.append(node)
-                    existing = node
-                _save_nodes(nodes)
-                _json(self, 201, {"ok": True, "node": existing})
+                    node_data["id"] = existing["id"]
+                try:
+                    saved = db.upsert_node(node_data)
+                    saved.setdefault("id", node_data["id"])
+                    saved.setdefault("registered_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+                except Exception:
+                    saved = node_data
+
+                # Track local node id
+                if saved.get("is_local"):
+                    global _local_node_id
+                    _local_node_id = saved["id"]
+
+                _json(self, 201, {"ok": True, "node": saved})
 
             # Node heartbeat
             elif path == "/api/nodes/heartbeat":
                 node_id = body.get("id")
+                db = _db()
+                # Find node by id or name
                 nodes = _load_nodes()
                 node = next((n for n in nodes if n.get("id") == node_id), None)
+                if node is None and node_id:
+                    # Try matching by name
+                    node = next((n for n in nodes if n.get("name") == node_id), None)
                 if node:
-                    node["last_seen"] = time.time()
-                    node["status"] = "online"
-                    node["training_active"] = body.get("training_active", False)
-                    _save_nodes(nodes)
+                    update_fields = {
+                        "last_seen": time.time(),
+                        "status": "online",
+                        "training_active": body.get("training_active", False),
+                    }
+                    if body.get("gpu"):
+                        update_fields["gpu"] = body["gpu"]
+                    if body.get("vram_gb") is not None:
+                        update_fields["vram_gb"] = float(body["vram_gb"])
+                    try:
+                        db.update_node(node["id"], **update_fields)
+                    except Exception:
+                        node.update(update_fields)
+                        _save_nodes(nodes)
                     _json(self, 200, {"ok": True})
                 else:
                     _json(self, 404, {"error": "node not found"})
@@ -950,11 +1404,51 @@ class Handler(BaseHTTPRequestHandler):
                 result = promote_checkpoint(
                     ckpt_name, label, promoted_by=body.get("promoted_by", "local")
                 )
-                # Reload inference with promoted checkpoint
-                with _lock:
-                    _inf = None
-                    _loaded = None
                 _json(self, 200, result)
+
+            # Promote with evaluation gate
+            elif path == "/api/models/promote_with_eval":
+                ckpt_name = body.get("checkpoint_name") or body.get("name")
+                if not ckpt_name:
+                    _json(self, 400, {"error": "checkpoint_name required"})
+                    return
+                # Evaluate first
+                from doof.intelligence.evaluate import evaluate_checkpoint
+                eval_result = evaluate_checkpoint(ckpt_name)
+                db = _db()
+                # Find or create the version record
+                versions = _load_versions()
+                vinfo = next((v for v in versions if v.get("checkpoint_name") == ckpt_name), None)
+                if vinfo:
+                    db.update_version(
+                        vinfo["id"],
+                        eval_result=eval_result,
+                        eval_passed=eval_result.get("status") == "ok",
+                        perplexity=eval_result.get("perplexity"),
+                        evaluated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    )
+                # Only promote if evaluation passes
+                if eval_result.get("status") == "ok" and eval_result.get("perplexity") is not None:
+                    result = promote_checkpoint(
+                        ckpt_name,
+                        body.get("label") or ckpt_name,
+                        promoted_by=body.get("promoted_by", "local"),
+                    )
+                    _json(self, 200, {"ok": True, "promoted": result, "evaluation": eval_result})
+                else:
+                    _json(self, 200, {
+                        "ok": False,
+                        "reason": "evaluation_failed",
+                        "evaluation": eval_result,
+                    })
+
+            # Add approved example
+            elif path == "/api/approved_examples":
+                try:
+                    record = add_approved_example(body)
+                    _json(self, 201, {"ok": True, "example": record})
+                except ValueError as e:
+                    _json(self, 400, {"error": str(e)})
 
             # Model load
             elif path == "/api/model/load":
@@ -1010,20 +1504,68 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/api/nodes/([^/]+)$", path)
             if m:
                 node_id = m.group(1)
-                nodes = _load_nodes()
-                original_len = len(nodes)
-                nodes = [n for n in nodes if n.get("id") != node_id]
-                if len(nodes) < original_len:
-                    _save_nodes(nodes)
+                db = _db()
+                try:
+                    ok = db.delete_node(node_id)
+                except Exception:
+                    ok = False
+                if not ok:
+                    # Try local fallback
+                    nodes = _load_nodes()
+                    original_len = len(nodes)
+                    nodes = [n for n in nodes if n.get("id") != node_id]
+                    if len(nodes) < original_len:
+                        _save_nodes(nodes)
+                        ok = True
+                if ok:
                     _json(self, 200, {"ok": True, "deleted": node_id})
                 else:
                     _json(self, 404, {"error": "node not found"})
+                return
+
+            # DELETE /api/approved_examples/{id}
+            m = re.match(r"^/api/approved_examples/([^/]+)$", path)
+            if m:
+                ex_id = m.group(1)
+                ok = delete_approved_example_api(ex_id)
+                if ok:
+                    _json(self, 200, {"ok": True, "deleted": ex_id})
+                else:
+                    _json(self, 404, {"error": "example not found"})
                 return
 
             _json(self, 404, {"error": "not found"})
 
         except Exception as e:
             _json(self, 500, {"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Background heartbeat thread (node liveness)
+# ---------------------------------------------------------------------------
+
+
+_heartbeat_thread: threading.Thread | None = None
+
+
+def _heartbeat_loop() -> None:
+    """Background thread that sends heartbeats for the local node."""
+    while not _stop.is_set():
+        try:
+            get_nodes_with_local()
+        except Exception:
+            pass
+        _stop.wait(_HEARTBEAT_INTERVAL)
+
+
+def _start_heartbeat() -> None:
+    global _heartbeat_thread
+    if _heartbeat_thread and _heartbeat_thread.is_alive():
+        return
+    _heartbeat_thread = threading.Thread(
+        target=_heartbeat_loop, daemon=True, name="doof-heartbeat"
+    )
+    _heartbeat_thread.start()
 
 
 # ---------------------------------------------------------------------------
@@ -1043,6 +1585,9 @@ def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
 
     # Register local node on startup
     get_nodes_with_local()
+
+    # Start background heartbeat
+    _start_heartbeat()
 
     s = ThreadingHTTPServer((host, port), Handler)
     print(f"DOOF API v0.2 listening on http://{host}:{port}")

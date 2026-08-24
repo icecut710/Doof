@@ -8,6 +8,10 @@ Simple priority-queue-based scheduler for background intelligence jobs:
 The scheduler assigns jobs to the best available compute node (highest VRAM).
 It does NOT implement distributed gradient synchronization — each job runs
 on exactly one worker.
+
+For distributed training jobs, the scheduler creates a record in the
+``training_jobs`` database table and assigns it to the strongest online
+worker (most VRAM).  Workers poll the table for jobs assigned to them.
 """
 from __future__ import annotations
 
@@ -19,6 +23,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
+
+from database import get_db
 
 ROOT = Path(__file__).resolve().parents[2]
 JOBS_PATH = ROOT / "data" / "jobs.json"
@@ -82,11 +88,92 @@ class Job:
         return self.priority < other.priority
 
 
+def select_strongest_worker() -> dict[str, Any] | None:
+    """Find the strongest online worker (highest VRAM).
+
+    Uses the database adapter so it works with both Supabase and local
+    JSON backends.
+    """
+    db = get_db()
+    try:
+        online = db.get_online_nodes()
+    except Exception:
+        # Fallback: use the scheduler's own node tracking
+        return _scheduler_local_best()
+    if not online:
+        return None
+    return sorted(online, key=lambda n: n.get("vram_gb", 0), reverse=True)[0]
+
+
+def _scheduler_local_best() -> dict[str, Any] | None:
+    """Fallback worker selection using in-memory scheduler state."""
+    if _scheduler is None:
+        return None
+    online = []
+    for node_id in list(_scheduler._jobs.keys()):
+        pass
+    # Check local hardware
+    try:
+        from doof.api import hardware
+        hw = hardware()
+    except Exception:
+        return None
+    gpu = "CPU"
+    vram = 0.0
+    if hw.get("cuda_available") and hw.get("cuda_devices"):
+        dev = hw["cuda_devices"][0]
+        gpu = dev.get("name", "Unknown")
+        vram = dev.get("total_memory_gb", 0.0)
+    return {"id": "local", "name": "Local", "gpu": gpu, "vram_gb": vram,
+            "status": "online"}
+
+
+def assign_training_job(
+    *,
+    payload: dict[str, Any] | None = None,
+    priority: int = 5,
+    created_by: str = "system",
+) -> dict[str, Any]:
+    """Create a training job in the database and assign it to the strongest
+    online worker.
+
+    If no workers are online, the job stays queued with ``worker=None``
+    and will be picked up when a worker comes online.
+    """
+    db = get_db()
+
+    # Select the strongest online worker
+    worker = select_strongest_worker()
+    worker_id = worker["id"] if worker else None
+
+    job_record: dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "type": "train",
+        "status": "queued",
+        "priority": priority,
+        "payload": payload or {},
+        "created_by": created_by,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "worker": worker_id,
+    }
+
+    result = db.insert_training_job(job_record)
+    if worker_id:
+        result["assigned_to"] = worker["name"]
+    else:
+        result["assigned_to"] = None
+    return result
+
+
 class JobScheduler:
     """Single-worker, priority-queue-based job scheduler.
 
     The scheduler runs a background daemon thread.  Jobs are dispatched
     to registered handler functions when they reach the front of the queue.
+
+    For distributed training jobs, :func:`assign_training_job` should be
+    used instead — it writes to the database so remote workers can claim
+    the job.
     """
 
     def __init__(self) -> None:

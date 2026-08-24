@@ -18,5 +18,13 @@ PUSH_TEST.md
 data/cloud.json
 data/settings.json
 data/knowledge.json
+data/training_jobs.json
+data/nodes.json
+data/approved_examples.json
+data/brain_versions.json
+data/memories.json
+data/jobs.json
 checkpoints/doof_step_*.pt
+doof/Doof/
+frontend/Doof/
 # keep doof_v01.pt optional; large — prefer train locally

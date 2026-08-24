@@ -44,6 +44,24 @@ type MemoryStats = {
   high_importance: number;
 };
 
+type TrainingQueueItem = {
+  id: string;
+  type: string;
+  priority: number;
+  created_at: string;
+  payload: Record<string, unknown>;
+  assigned_worker: string | null;
+};
+
+type RunningJob = {
+  id: string;
+  step: number | null;
+  epoch: number | null;
+  total_epochs: number | null;
+  loss: number | null;
+  worker: string | null;
+};
+
 type TrainState = {
   running: boolean;
   step: number;
@@ -58,6 +76,12 @@ type TrainState = {
   memory_count: number;
   brain_version: string;
   dataset_version: string | null;
+  examples_count: number;
+  total_feedback: number;
+  workers_online: number;
+  training_queue: TrainingQueueItem[];
+  running_jobs: RunningJob[];
+  online_nodes: NodeItem[];
 };
 
 type CheckpointItem = {
@@ -997,6 +1021,12 @@ function TrainingTab({ online }: { online: boolean }) {
     memory_count: 0,
     brain_version: "1.0.0",
     dataset_version: null,
+    examples_count: 0,
+    total_feedback: 0,
+    workers_online: 0,
+    training_queue: [],
+    running_jobs: [],
+    online_nodes: [],
   });
 
   const refresh = useCallback(async () => {
@@ -1080,6 +1110,23 @@ function TrainingTab({ online }: { online: boolean }) {
         />
       </div>
 
+      {/* Compute pool stats */}
+      <div className="mb-3 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+        <MetricCard label="Workers Online" value={train.workers_online} />
+        <MetricCard
+          label="Queue Depth"
+          value={train.training_queue?.length ?? 0}
+        />
+        <MetricCard
+          label="Total Feedback"
+          value={train.total_feedback}
+        />
+        <MetricCard
+          label="Examples Count"
+          value={train.examples_count}
+        />
+      </div>
+
       {/* Live stats (during training) */}
       {train.running && (
         <GlassPanel className="mb-3 p-3" glow>
@@ -1110,6 +1157,57 @@ function TrainingTab({ online }: { online: boolean }) {
               )}
             </div>
             <div className="text-[9px] text-zinc-600">{train.message}</div>
+          </div>
+        </GlassPanel>
+      )}
+
+      {/* Training queue */}
+      {train.training_queue && train.training_queue.length > 0 && (
+        <GlassPanel className="mb-3 p-3">
+          <div className="mb-1.5 text-[8px] uppercase tracking-[0.12em] text-zinc-700">
+            Training Queue ({train.training_queue.length})
+          </div>
+          <div className="space-y-1">
+            {train.training_queue.map((job) => (
+              <div
+                key={job.id}
+                className="flex items-center justify-between rounded-lg border border-white/[0.04] bg-black/30 px-2.5 py-1.5"
+              >
+                <div className="flex items-center gap-2 text-[9px]">
+                  <span className="text-violet-400/60">↯</span>
+                  <span className="text-zinc-300">{job.type}</span>
+                  <StatusBadge tone="warning">Queued</StatusBadge>
+                </div>
+                <div className="text-[7px] text-zinc-600">
+                  Priority {job.priority} · {job.assigned_worker ?? "Unassigned"}
+                </div>
+              </div>
+            ))}
+          </div>
+        </GlassPanel>
+      )}
+
+      {/* Running jobs */}
+      {train.running_jobs && train.running_jobs.length > 0 && (
+        <GlassPanel className="mb-3 p-3">
+          <div className="mb-1.5 text-[8px] uppercase tracking-[0.12em] text-zinc-700">
+            Running Jobs ({train.running_jobs.length})
+          </div>
+          <div className="space-y-1">
+            {train.running_jobs.map((job) => (
+              <div
+                key={job.id}
+                className="flex items-center justify-between rounded-lg border border-white/[0.04] bg-black/30 px-2.5 py-1.5"
+              >
+                <div className="text-[9px] text-zinc-300">Job {job.id.slice(0, 8)}…</div>
+                <div className="flex items-center gap-3 text-[8px] text-zinc-600">
+                  {job.epoch != null && <span>Epoch {job.epoch}</span>}
+                  {job.total_epochs != null && <span>/ {job.total_epochs}</span>}
+                  {job.step != null && <span>Step {job.step}</span>}
+                  {job.loss != null && <span className="text-violet-300">Loss {Number(job.loss).toFixed(4)}</span>}
+                </div>
+              </div>
+            ))}
           </div>
         </GlassPanel>
       )}
@@ -1193,9 +1291,11 @@ function NetworkTab({ online }: { online: boolean }) {
       const data = await api<{
         nodes: NodeItem[];
         nodes_online: number;
+        connected_users: number;
         total_vram_gb: number;
         training_active: boolean;
-      }>("/api/nodes");
+        workers_online: number;
+      }>("api/network");
       setNodes(data.nodes ?? []);
       setTotalVram(data.total_vram_gb ?? 0);
       setTrainingActive(data.training_active ?? false);
@@ -1213,6 +1313,7 @@ function NetworkTab({ online }: { online: boolean }) {
   }, [online, load]);
 
   const onlineNodes = nodes.filter((n) => n.status === "online");
+  const connectedUsers = onlineNodes.filter((n) => !n.is_local).length + 1; // +1 for local
 
   return (
     <div className="flex-1 overflow-y-auto p-4">
@@ -1222,7 +1323,7 @@ function NetworkTab({ online }: { online: boolean }) {
           DOOF COMPUTE NETWORK
         </div>
         <div className="mt-1 text-[13px] font-semibold text-zinc-200">
-          Node Pool
+          Collaborative Brain
         </div>
       </div>
 
@@ -1235,8 +1336,20 @@ function NetworkTab({ online }: { online: boolean }) {
           accent
         />
         <MetricCard
+          label="Connected Users"
+          value={connectedUsers}
+          sub="Trusted collaborators"
+        />
+        <MetricCard
           label="Total VRAM"
           value={`${totalVram.toFixed(1)} GB`}
+        />
+      </div>
+
+      <div className="mb-3 grid grid-cols-2 gap-1.5">
+        <MetricCard
+          label="GPU Pool"
+          value={onlineNodes.some((n) => n.gpu !== "CPU") ? "Hardware" : "CPU only"}
         />
         <MetricCard
           label="Training"

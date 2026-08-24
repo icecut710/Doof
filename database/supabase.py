@@ -8,7 +8,8 @@ through the Supabase REST API.  Requires environment variables:
     SUPABASE_ANON_KEY      (for client reads)
 
 Tables required in Supabase (see supabase/schema.sql):
-    memories, feedback, nodes, brain_versions
+    memories, feedback, nodes, brain_versions, training_jobs,
+    approved_examples
 
 This module is intentionally NOT imported unless Supabase is configured.
 The API layer always uses get_db() from __init__.py which selects the
@@ -75,6 +76,28 @@ def _delete(table: str, id_value: str) -> bool:
         raise SupabaseError(f"DELETE {table} failed: {e}") from e
 
 
+def _now_iso() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _patch(table: str, id_value: str, data: dict[str, Any]) -> dict[str, Any] | list:
+    """PATCH a single row by primary key, returning the updated record."""
+    url = f"{_URL}/rest/v1/{table}?id=eq.{id_value}"
+    body = json.dumps(data).encode()
+    h = _headers()
+    h["Prefer"] = "return=representation"
+    req = Request(url, data=body, headers=h, method="PATCH")
+    try:
+        with urlopen(req, timeout=_TIMEOUT) as resp:
+            result = json.loads(resp.read())
+            if isinstance(result, list):
+                return result[0] if result else {}
+            return result
+    except URLError as e:
+        raise SupabaseError(f"PATCH {table} failed: {e}") from e
+
+
 # ---------------------------------------------------------------------------
 # Memories
 # ---------------------------------------------------------------------------
@@ -114,6 +137,15 @@ def insert_feedback(record: dict[str, Any]) -> dict[str, Any]:
     return _post("feedback", record)
 
 
+def update_feedback(feedback_id: str, **fields: Any) -> dict[str, Any] | None:
+    """Update a feedback record by id.  Returns the updated record or None."""
+    try:
+        data = _patch("feedback", feedback_id, fields)
+        return data if isinstance(data, dict) and data else None
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Nodes
 # ---------------------------------------------------------------------------
@@ -140,6 +172,15 @@ def delete_node(node_id: str) -> bool:
     return _delete("nodes", node_id)
 
 
+def update_node(node_id: str, **fields: Any) -> dict[str, Any] | None:
+    """Update a node record by id.  Returns the updated record or None."""
+    try:
+        data = _patch("nodes", node_id, fields)
+        return data if isinstance(data, dict) and data else None
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Brain versions
 # ---------------------------------------------------------------------------
@@ -150,3 +191,127 @@ def get_versions() -> list[dict[str, Any]]:
 
 def insert_version(record: dict[str, Any]) -> dict[str, Any]:
     return _post("brain_versions", record)
+
+
+def update_version(version_id: str, **fields: Any) -> dict[str, Any] | None:
+    """Update a brain version record by id."""
+    try:
+        data = _patch("brain_versions", version_id, fields)
+        return data if isinstance(data, dict) and data else None
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# APPROVED EXAMPLES
+# ---------------------------------------------------------------------------
+
+def get_approved_examples(
+    *,
+    approved_only: bool = True,
+    training_ready_only: bool = True,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    params = []
+    if approved_only:
+        params.append("approved=eq.true")
+    if training_ready_only:
+        params.append("training_ready=eq.true")
+    q = f"order=created_at.desc&limit={limit}"
+    if params:
+        q = "&".join(params) + "&" + q
+    return _get("approved_examples", q)
+
+
+def insert_approved_example(record: dict[str, Any]) -> dict[str, Any]:
+    return _post("approved_examples", record)
+
+
+def delete_approved_example(example_id: str) -> bool:
+    return _delete("approved_examples", example_id)
+
+
+def count_approved_examples() -> dict[str, int]:
+    """Return counts of approved examples."""
+    try:
+        total = len(_get("approved_examples", "select=id"))
+        approved = len(_get("approved_examples", "approved=eq.true&select=id"))
+        training_ready = len(_get("approved_examples", "training_ready=eq.true&select=id"))
+        return {"total": total, "approved": approved, "training_ready": training_ready}
+    except Exception:
+        return {"total": 0, "approved": 0, "training_ready": 0}
+
+
+# ---------------------------------------------------------------------------
+# TRAINING JOBS (distributed compute queue)
+# ---------------------------------------------------------------------------
+
+def get_training_jobs(
+    *,
+    status: str | None = None,
+    worker_id: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    params = []
+    if status:
+        params.append(f"status=eq.{status}")
+    if worker_id:
+        params.append(f"worker=eq.{worker_id}")
+    q = "order=created_at.desc"
+    if params:
+        q = "&".join(params) + "&" + q
+    return _get("training_jobs", q)
+
+
+def insert_training_job(record: dict[str, Any]) -> dict[str, Any]:
+    return _post("training_jobs", record)
+
+
+def update_training_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
+    """Update a training job record by id."""
+    try:
+        data = _patch("training_jobs", job_id, fields)
+        return data if isinstance(data, dict) and data else None
+    except Exception:
+        return None
+
+
+def claim_training_job(job_id: str, worker_id: str) -> dict[str, Any] | None:
+    """Atomically claim a queued training job.  Uses a filter so only
+    ``status=eq.queued`` rows are updated."""
+    url = f"{_URL}/rest/v1/training_jobs?id=eq.{job_id}&status=eq.queued"
+    body = json.dumps(
+        {"status": "running", "worker": worker_id, "started_at": _now_iso()}
+    ).encode()
+    h = _headers()
+    h["Prefer"] = "return=representation"
+    req = Request(url, data=body, headers=h, method="PATCH")
+    try:
+        with urlopen(req, timeout=_TIMEOUT) as resp:
+            result = json.loads(resp.read())
+            if isinstance(result, list) and result:
+                return result[0]
+    except URLError:
+        pass
+    return None
+
+
+def delete_training_job(job_id: str) -> bool:
+    return _delete("training_jobs", job_id)
+
+
+# ---------------------------------------------------------------------------
+# Worker selection helpers
+# ---------------------------------------------------------------------------
+
+def get_online_nodes() -> list[dict[str, Any]]:
+    """Return nodes that are currently online (status=online)."""
+    return _get("nodes", "status=eq.online&order=last_seen.desc")
+
+
+def get_strongest_online_worker() -> dict[str, Any] | None:
+    """Return the online node with the most VRAM, or None if none online."""
+    online = get_online_nodes()
+    if not online:
+        return None
+    return sorted(online, key=lambda n: n.get("vram_gb", 0), reverse=True)[0]

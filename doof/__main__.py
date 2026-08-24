@@ -1,4 +1,4 @@
-"""CLI entry point: python -m doof [serve|chat|train|gui]"""
+"""CLI entry point: python -m doof [serve|chat|train|worker|gui]"""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ def main(argv: list[str] | None = None) -> int:
         "command",
         nargs="?",
         default="gui",
-        choices=["gui", "serve", "chat", "train", "version"],
+        choices=["gui", "serve", "chat", "train", "worker", "version"],
         help="Command to run (default: gui)",
     )
     parser.add_argument("--host", default="127.0.0.1", help="API host (serve)")
@@ -66,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         trainer = DOOFTrainer(config)
         trainer.train()
+        return 0
+
+    if args.command == "worker":
+        from doof.training import run_worker
+        run_worker()
         return 0
 
     from doof.gui.app import main as gui_main
