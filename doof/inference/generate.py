@@ -5,7 +5,7 @@ from pathlib import Path
 
 class DOOFInference:
     def __init__(self, checkpoint_path: str):
-        from doof.runtime import import_torch, torch_error
+        from doof.runtime import import_torch, resolve_device, torch_error
 
         torch = import_torch()
         if torch is None:
@@ -15,7 +15,9 @@ class DOOFInference:
         from doof.tokenizer import DOOFTokenizer
 
         self._torch = torch
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device_str, device_label = resolve_device(torch)
+        self.device = torch.device(device_str)
+        self.device_label = device_label
         self.tokenizer = DOOFTokenizer()
         checkpoint_file = Path(checkpoint_path)
         if not checkpoint_file.exists():

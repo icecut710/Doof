@@ -1,6 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller onedir spec for DOOF v0.3 — friend-ready Windows EXE.
 
+CRITICAL: Do NOT exclude torch.distributed.
+Excluding it and pre-stubbing the module caused:
+  AttributeError: partially initialized module 'torch' has no attribute 'distributed'
+
 Output:
   dist/DOOF/DOOF.exe
   dist/DOOF/_internal/...
@@ -66,15 +70,18 @@ a = Analysis(
         "doof",
         "doof.api",
         "doof.api_extra",
+        "doof.api_mount",
         "doof.paths",
         "doof.gui",
         "doof.gui.app",
         "doof.gui.main_window",
         "doof.inference",
+        "doof.inference.generate",
         "doof.training",
         "doof.tokenizer",
         "doof.model",
         "doof.cloud",
+        "doof.cloud.client",
         "doof.intelligence",
         "doof.intelligence.store",
         "doof.intelligence.rag",
@@ -106,6 +113,10 @@ a = Analysis(
         "PySide6.QtPrintSupport",
         "shiboken6",
         "torch",
+        "torch.cuda",
+        "torch.nn",
+        "torch.nn.functional",
+        "torch.distributed",
         "tqdm",
         "http.server",
         "json",
@@ -126,13 +137,13 @@ a = Analysis(
         "IPython",
         "notebook",
         "pytest",
-        "nvidia",
         "triton",
-        "torch.distributed",
         "torch.testing",
         "torch.utils.tensorboard",
         "sympy",
         "networkx",
+        # Do NOT exclude torch.distributed — required for clean torch import.
+        # nvidia/cudnn may still be large; collect what the installed torch needs.
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -145,6 +156,11 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 _icon = ROOT / "assets" / "doof.ico"
 if not _icon.is_file():
     _icon = ROOT / "assets" / "doof_icon.ico"
+if not _icon.is_file():
+    # Prefer MRNADDAF visual identity when ico missing
+    for cand in (ROOT / "assets" / "mrnaddaf.png", ROOT / "frontend" / "public" / "mrnaddaf.png"):
+        if cand.is_file():
+            break
 
 exe = EXE(
     pyz,
