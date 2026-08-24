@@ -5,6 +5,7 @@ Supabase is the control plane (presence, job state). Payloads are small JSON
 
 NAT: nodes poll outbound for assigned jobs. Same-LAN peers may also be hit
 directly at ``lan_url`` when reachable.
+LAN is an optimization, NOT a requirement.
 """
 from __future__ import annotations
 
@@ -46,9 +47,16 @@ def _settings() -> dict[str, Any]:
         "accept_cpu": True,
         "accept_gpu": True,
         "max_jobs": 1,
+        "max_cpu_pct": 80,
+        "max_gpu_pct": 90,
+        "max_vram_gb": None,
         "pause_on_battery": True,
         "pause_when_gaming": True,
         "idle_only": False,
+        "only_while_open": True,
+        "allow_train": False,
+        "allow_inference": True,
+        "allow_embedding": True,
     }
     try:
         from doof.paths import user_data_dir
@@ -79,6 +87,14 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
 
 def execute_local(job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Run an allowed job on this process. Never exec() user code."""
+    settings = _settings()
+    if job_type == "train" and not settings.get("allow_train", False):
+        raise JobRejected("training contribution is disabled on this node")
+    if job_type == "inference" and not settings.get("allow_inference", True):
+        raise JobRejected("inference contribution is disabled on this node")
+    if job_type == "embedding" and not settings.get("allow_embedding", True):
+        raise JobRejected("embedding contribution is disabled on this node")
+
     data = validate_payload(job_type, payload)
     if job_type == "inference":
         return _local_inference(data)
@@ -151,7 +167,6 @@ def _local_inference(data: dict[str, Any]) -> dict[str, Any]:
                 "memories_used": memories,
             }
         except Exception as e:
-            # Fall through to memory / cloud. Never raise to the UI.
             torch_fail = e
         else:
             torch_fail = None
@@ -178,7 +193,6 @@ def _local_inference(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cloud_inference(prompt: str, memories: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Optional cloud brain. Never required. Uses XAI_API_KEY if present."""
     key = os.environ.get("XAI_API_KEY") or os.environ.get("DOOF_XAI_API_KEY")
     if not key:
         return None
@@ -249,7 +263,20 @@ def dispatch_inference(
     local_id: str | None = None,
     token: str | None = None,
 ) -> dict[str, Any]:
-    """Route a chat job. Remote if a better willing node exists, else local."""
+    """Route a chat job. Remote if a better willing node exists, else local.
+
+    Global path: Supabase queue + outbound poll (works across NATs).
+    LAN path: direct HTTP when lan_url is reachable (optimization only).
+    """
+    try:
+        from doof.admin import pool_paused
+
+        if pool_paused():
+            # Admin paused the pool — force local only
+            nodes = [n for n in (nodes or []) if n.get("is_local")]
+    except Exception:
+        pass
+
     payload = validate_payload(
         "inference",
         {
@@ -276,6 +303,7 @@ def dispatch_inference(
                 remote["provider"] = remote.get("provider") or "remote"
                 used_remote = True
                 return remote
+        # Global / NAT path — enqueue on Supabase control plane
         queued = _enqueue("inference", payload, worker=str(target.get("id")), requester=local_id)
         if queued:
             result = _wait_job(queued.get("id"), timeout=40)
@@ -316,7 +344,6 @@ def _enqueue(job_type: str, payload: dict[str, Any], *, worker: str | None, requ
         db = _db()
         if hasattr(db, "insert_compute_job"):
             return db.insert_compute_job(record)
-        # Fall back onto training_jobs table if compute_jobs is missing.
         if hasattr(db, "insert_training_job"):
             record2 = dict(record)
             record2["worker"] = worker
@@ -367,6 +394,13 @@ def start_worker_loop(local_id_fn, execute_fn=None) -> None:
 
 
 def _poll_once(local_id_fn, execute_fn) -> None:
+    try:
+        from doof.admin import pool_paused
+
+        if pool_paused():
+            return
+    except Exception:
+        pass
     settings = _settings()
     if not settings.get("accepting_jobs"):
         return
@@ -398,6 +432,13 @@ def _poll_once(local_id_fn, execute_fn) -> None:
     if not mine:
         return
     job = mine[0]
+    jtype = job.get("type") or "inference"
+    if jtype == "train" and not settings.get("allow_train"):
+        return
+    if jtype == "inference" and not settings.get("allow_inference", True):
+        return
+    if jtype == "embedding" and not settings.get("allow_embedding", True):
+        return
     jid = job.get("id")
     claimed = None
     try:
@@ -411,6 +452,8 @@ def _poll_once(local_id_fn, execute_fn) -> None:
         return
     global _local_jobs
     with _jobs_lock:
+        if _local_jobs >= int(settings.get("max_jobs") or 1):
+            return
         _local_jobs += 1
     try:
         result = execute_fn(claimed.get("type") or "inference", claimed.get("payload") or {})
