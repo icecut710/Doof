@@ -12,7 +12,27 @@ Build (from repo root, on Windows):
 
 from pathlib import Path
 
-ROOT = Path(SPECPATH).resolve().parent.parent
+# SPECPATH is the *directory* containing this .spec (not the file path).
+# packaging/ → project root is the parent.
+_spec = Path(SPECPATH).resolve()
+_candidates = [
+    _spec.parent if _spec.name.lower() == "packaging" else None,
+    _spec,
+    _spec.parent,
+    _spec.parent.parent,
+]
+ROOT = None
+for c in _candidates:
+    if c is None:
+        continue
+    if (c / "doof" / "__main__.py").is_file():
+        ROOT = c
+        break
+if ROOT is None:
+    raise SystemExit(
+        f"Could not locate doof/__main__.py from SPECPATH={_spec}. "
+        "Run PyInstaller from the DOOF repo root."
+    )
 
 def _datas():
     items = []
