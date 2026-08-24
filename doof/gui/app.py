@@ -39,6 +39,10 @@ DIST = FRONTEND / "dist"
 
 UI_PORT = 8766
 API_PORT = 8765
+# Supabase's default email-verification redirect target (see DOOF_VERIFY_REDIRECT).
+# Serving on this port means clicking a confirmation link lands on the app
+# instead of "localhost:3000 can't connect".
+VERIFY_PORT = 3000
 
 
 def _port_open(host: str, port: int) -> bool:
@@ -328,6 +332,17 @@ def main() -> int:
     ui_port = _find_free_port(UI_PORT)
     start_static_server(DIST, ui_port)
     time.sleep(0.15)
+
+    # Best-effort listener on the email-verification callback port so that
+    # clicking a Supabase confirmation link resolves to DOOF (it currently
+    # redirects to http://localhost:3000). Skipped silently if the port is busy.
+    verify_port = int(os.environ.get("DOOF_VERIFY_PORT", VERIFY_PORT))
+    if not _port_open("127.0.0.1", verify_port):
+        try:
+            start_static_server(DIST, verify_port)
+            print(f"DOOF: verification callback on :{verify_port}")
+        except Exception as e:
+            print(f"DOOF: could not open :{verify_port} ({e})")
 
     window = DOOFWindow(f"http://127.0.0.1:{ui_port}/")
     window.show()

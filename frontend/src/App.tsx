@@ -2057,13 +2057,54 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [sett] = useState({ temperature: 0.7, max_new_tokens: 80, top_k: 50 });
   const [trainRunning, setTrainRunning] = useState(false);
+  // 'verifying' | 'verified' | 'error' | null (email confirmation landing)
+  const [verifyState, setVerifyState] = useState<"verifying" | "verified" | "error" | null>(null);
+  const [verifyMsg, setVerifyMsg] = useState("");
 
-  // Validate stored session / handle Google OAuth redirect on startup
+  // Validate stored session / handle OAuth + email-verification redirects
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
     const hash = window.location.hash;
+
+    // --- Email verification link (?token=...&type=signup or #token=...) ---
+    const vt =
+      params.get("token") ||
+      hash.match(/[?&]token=([^&]+)/)?.[1] ||
+      hash.match(/[#?]token=([^&]+)/)?.[1];
+    const vtype = params.get("type") || "signup";
+    if (vt) {
+      history.replaceState(null, "", window.location.pathname);
+      setVerifyState("verifying");
+      fetch(`${serverBase()}/api/auth/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: decodeURIComponent(vt), type: vtype }),
+      })
+        .then((r) => r.json())
+        .then((d: { token?: string; profile?: Profile; error?: string; status?: string }) => {
+          if (d.token && d.profile) {
+            storeToken(d.token, true);
+            setVerifyState(null); // verified + session → enter DOOF directly
+            setProfile(d.profile);
+          } else if (d.status === "already_verified") {
+            setVerifyState("verified");
+          } else {
+            setVerifyState("error");
+            setVerifyMsg(
+              d.error || "This verification link is invalid or has expired — request a new one.",
+            );
+          }
+        })
+        .catch(() => {
+          setVerifyState("error");
+          setVerifyMsg("Couldn't reach the DOOF brain to verify your email.");
+        });
+      return;
+    }
+
+    // --- Google OAuth (Supabase implicit flow) returned to us ---
     const m = hash.match(/access_token=([^&]+)/);
     if (m) {
-      // Google OAuth (Supabase implicit flow) returned to us — exchange it.
       history.replaceState(null, "", window.location.pathname);
       fetch(`${serverBase()}/api/auth/oauth`, {
         method: "POST",
@@ -2161,6 +2202,85 @@ export default function App() {
   }, [msgs]);
 
   // ---- Auth gate -------------------------------------------------------
+  if (verifyState === "verifying") {
+    return (
+      <div className="relative h-screen w-screen overflow-hidden bg-[#030304] text-zinc-300">
+        <NaddafAtmosphere />
+        <div className="relative z-10 flex h-full items-center justify-center">
+          <div className="doof-fade flex flex-col items-center">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-violet-400/20 bg-violet-500/[0.07] text-[16px] text-violet-300 doof-pulse">
+              ◆
+            </div>
+            <div className="mt-3 text-[13px] font-semibold text-zinc-100">Verifying email…</div>
+            <div className="mt-1 text-[9px] text-zinc-500">Confirming with the DOOF brain.</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (verifyState === "verified") {
+    return (
+      <div className="relative h-screen w-screen overflow-hidden bg-[#030304] text-zinc-300">
+        <NaddafAtmosphere />
+        <div className="relative z-10 flex h-full items-center justify-center">
+          <div className="doof-fade w-full max-w-[340px] rounded-3xl border border-white/[0.06] bg-[#09090b]/92 p-6 text-center shadow-[0_20px_70px_rgba(0,0,0,0.5)] backdrop-blur-md">
+            <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl border border-emerald-400/20 bg-emerald-500/[0.07] text-[16px] text-emerald-300">
+              ✓
+            </div>
+            <h1 className="mt-3 text-[15px] font-semibold tracking-tight text-zinc-100">
+              EMAIL VERIFIED
+            </h1>
+            <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-400">
+              You're in. Entering DOOF now.
+            </p>
+            {!profile && (
+              <button
+                type="button"
+                onClick={() => {
+                  setVerifyState(null);
+                  setProfile(null);
+                }}
+                className="mt-4 w-full rounded-xl border border-violet-400/20 bg-violet-600/70 py-2 text-[10px] font-medium text-white transition hover:bg-violet-500"
+              >
+                Sign in
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (verifyState === "error") {
+    return (
+      <div className="relative h-screen w-screen overflow-hidden bg-[#030304] text-zinc-300">
+        <NaddafAtmosphere />
+        <div className="relative z-10 flex h-full items-center justify-center">
+          <div className="doof-fade w-full max-w-[340px] rounded-3xl border border-white/[0.06] bg-[#09090b]/92 p-6 text-center shadow-[0_20px_70px_rgba(0,0,0,0.5)] backdrop-blur-md">
+            <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl border border-rose-400/20 bg-rose-500/[0.07] text-[16px] text-rose-300">
+              !
+            </div>
+            <h1 className="mt-3 text-[15px] font-semibold tracking-tight text-zinc-100">
+              VERIFICATION FAILED
+            </h1>
+            <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-400">{verifyMsg}</p>
+            <button
+              type="button"
+              onClick={() => {
+                setVerifyState(null);
+                setProfile(null);
+              }}
+              className="mt-4 w-full rounded-xl border border-violet-400/20 bg-violet-600/70 py-2 text-[10px] font-medium text-white transition hover:bg-violet-500"
+            >
+              Back to sign in
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (profile === undefined) {
     return <div className="h-screen w-screen bg-[#030304]" />;
   }

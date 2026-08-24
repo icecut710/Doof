@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import unittest
 from pathlib import Path
@@ -11,6 +12,11 @@ import doof.api as api
 
 class AuthTests(unittest.TestCase):
     def setUp(self):
+        # Force local-only auth for deterministic unit tests (never touch the
+        # live Supabase project configured in .env).
+        self._saved = dict(os.environ)
+        for k in ("SUPABASE_URL", "SUPABASE_KEY", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY"):
+            os.environ.pop(k, None)
         self.profiles = Path(api.PROFILES_PATH)
         self.sessions = Path(api.SESSIONS_PATH)
         self._backup = []
@@ -22,6 +28,9 @@ class AuthTests(unittest.TestCase):
     def tearDown(self):
         for p, content in self._backup:
             p.write_text(content, encoding="utf-8")
+        for k in ("SUPABASE_URL", "SUPABASE_KEY", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY"):
+            os.environ.pop(k, None)
+        os.environ.update(self._saved)
 
     # -- signup validation -------------------------------------------------
 
@@ -98,6 +107,23 @@ class AuthTests(unittest.TestCase):
         code, payload = api.auth_login({"email": "v@doof.ai", "password": "goodpass1"})
         self.assertEqual(code, 403)
         self.assertEqual(payload.get("code"), "email_unverified")
+
+    # -- verification --------------------------------------------------------
+
+    def test_verify_requires_supabase(self):
+        # Without Supabase configured, verification isn't available -> 400.
+        os.environ.pop("SUPABASE_URL", None)
+        os.environ.pop("SUPABASE_KEY", None)
+        code, payload = api.auth_verify("some-token")
+        self.assertEqual(code, 400)
+
+    def test_verify_missing_token(self):
+        code, _ = api.auth_verify("")
+        self.assertEqual(code, 400)
+
+    def test_verify_redirect_default_is_served_port(self):
+        os.environ.pop("DOOF_VERIFY_REDIRECT", None)
+        self.assertEqual(api._verify_redirect(), "http://localhost:3000")
 
 
 class FreshInstallTests(unittest.TestCase):

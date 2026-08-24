@@ -270,6 +270,12 @@ def _supabase_cfg() -> tuple[str, str] | None:
     return (url, key) if url and key else None
 
 
+def _verify_redirect() -> str:
+    """Where Supabase tells the browser to go after a confirmation link is
+    clicked.  DOOF serves this URL so verification resolves to the app."""
+    return os.environ.get("DOOF_VERIFY_REDIRECT", "http://localhost:3000")
+
+
 def _supabase_signup(email: str, password: str) -> tuple[int, dict[str, Any]]:
     """Real signup through Supabase Auth (sends verification email)."""
     cfg = _supabase_cfg()
@@ -281,7 +287,13 @@ def _supabase_signup(email: str, password: str) -> tuple[int, dict[str, Any]]:
 
         req = Request(
             f"{url}/auth/v1/signup",
-            data=json.dumps({"email": email, "password": password}).encode(),
+            data=json.dumps(
+                {
+                    "email": email,
+                    "password": password,
+                    "options": {"emailRedirectTo": _verify_redirect()},
+                }
+            ).encode(),
             headers={"apikey": key, "Content-Type": "application/json"},
             method="POST",
         )
@@ -326,6 +338,71 @@ def _supabase_signup(email: str, password: str) -> tuple[int, dict[str, Any]]:
         return 502, {"error": f"Supabase connection lost ({msg or e})"}
 
 
+def auth_verify(token: str) -> tuple[int, dict[str, Any]]:
+    """Complete a Supabase email-verification link clicked in the browser.
+
+    The confirmation email points at this app (see DOOF_VERIFY_REDIRECT).
+    The app hands the ``token`` here, Supabase validates/confirms the email,
+    and — only then — a real DOOF session is issued for the verified account.
+    """
+    cfg = _supabase_cfg()
+    if not cfg:
+        return 400, {"error": "email verification requires Supabase"}
+    url, key = cfg
+    token = (token or "").strip()
+    if not token:
+        return 400, {"error": "missing verification token"}
+    try:
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            f"{url}/auth/v1/verify",
+            data=json.dumps({"type": "signup", "token": token}).encode(),
+            headers={"apikey": key, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        body = getattr(e, "read", None)
+        msg = ""
+        try:
+            msg = json.loads(body().decode()).get("msg", "") if callable(body) else ""
+        except Exception:
+            pass
+        if "invalid" in (msg or "").lower() or "expired" in (msg or "").lower():
+            return 400, {"error": "This verification link is invalid or has expired."}
+        return 502, {"error": f"Supabase connection lost ({msg or e})"}
+
+    user = data.get("user") or {}
+    email = (user.get("email") or "").lower()
+    if not email:
+        # No user object — treat as already-verified if a token was accepted.
+        return 200, {"status": "already_verified"}
+
+    profiles = _load_profiles()
+    profile = next((p for p in profiles if p.get("email") == email), None)
+    if profile is None:
+        role = "owner" if not profiles else "trusted"
+        profile = {
+            "id": user.get("id") or str(uuid.uuid4()),
+            "email": email,
+            "name": "",
+            "role": role,
+            "created_at": _utcnow(),
+            "provider": "supabase",
+            "email_verified": True,
+        }
+        profiles.append(profile)
+        _save_profiles(profiles)
+    else:
+        profile["email_verified"] = True
+        _save_profiles(profiles)
+
+    doof_token = _create_session(profile["id"])
+    return 200, {"token": doof_token, "profile": _public_profile(profile)}
+
+
 def auth_config() -> dict[str, Any]:
     cfg = _supabase_cfg()
     if cfg:
@@ -348,7 +425,9 @@ def auth_resend(email: str) -> tuple[int, dict[str, Any]]:
 
         req = Request(
             f"{url}/auth/v1/resend",
-            data=json.dumps({"type": "signup", "email": email}).encode(),
+            data=json.dumps(
+                {"type": "signup", "email": email, "options": {"emailRedirectTo": _verify_redirect()}}
+            ).encode(),
             headers={"apikey": key, "Content-Type": "application/json"},
             method="POST",
         )
@@ -1660,6 +1739,10 @@ class Handler(BaseHTTPRequestHandler):
 
             elif path == "/api/auth/resend":
                 code, payload = auth_resend((body.get("email") or "").strip().lower())
+                _json(self, code, payload)
+
+            elif path == "/api/auth/verify":
+                code, payload = auth_verify((body.get("token") or "").strip())
                 _json(self, code, payload)
 
             elif path == "/api/auth/oauth":
