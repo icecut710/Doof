@@ -1,7 +1,4 @@
-"""Extra HTTP handlers for updates, admin, device preference (v0.3).
-
-Mounted via doof.api_mount onto Handler.do_GET / do_POST.
-"""
+"""Extra HTTP handlers: updates, admin, device, models, hosted brain."""
 from __future__ import annotations
 
 import json
@@ -34,7 +31,42 @@ def try_handle(
     except Exception:
         profile = None
 
-    # -------- Device preference (local inference hardware) --------
+    # -------- Models --------
+    if path == "/api/models" and method == "GET":
+        from doof.models import list_registry, model_compatible
+        from doof.runtime import probe_hardware
+
+        hw = probe_hardware()
+        models = []
+        for m in list_registry():
+            ok, reason = model_compatible(m, hw)
+            d = m.as_dict()
+            d["compatible"] = ok
+            d["compatibility_detail"] = reason
+            models.append(d)
+        _json(handler, 200, {"models": models, "cache": True})
+        return True
+
+    if path == "/api/models/ensure" and method == "POST":
+        from doof.models import ensure_model
+
+        body = read_json()
+        mid = str(body.get("model_id") or "doof-base")
+        ver = body.get("version")
+        try:
+            m = ensure_model(mid, str(ver) if ver else None)
+            _json(handler, 200, {"ok": True, "model": m.as_dict()})
+        except Exception as e:
+            _json(handler, 400, {"ok": False, "error": str(e)})
+        return True
+
+    if path == "/api/brain/hosted" and method == "GET":
+        from doof.cloud.hosted_brain import hosted_config, hosted_health
+
+        _json(handler, 200, {"config": hosted_config(), "health": hosted_health()})
+        return True
+
+    # -------- Device preference --------
     if path == "/api/device" and method == "GET":
         from doof.runtime import (
             device_options,
@@ -59,6 +91,8 @@ def try_handle(
                     "device_label": hw.get("device_label"),
                     "cuda_detected": hw.get("cuda_detected"),
                     "cuda_available": hw.get("cuda_available"),
+                    "physical_gpu": hw.get("physical_gpu"),
+                    "torch_cuda": hw.get("torch_cuda"),
                     "cuda_devices": hw.get("cuda_devices"),
                     "mps_available": hw.get("mps_available"),
                     "cpu_count": hw.get("cpu_count"),
@@ -67,6 +101,7 @@ def try_handle(
                     "acceleration_detail": hw.get("acceleration_detail"),
                     "torch_available": hw.get("torch_available"),
                     "torch_error": hw.get("torch_error"),
+                    "build_kind": hw.get("build_kind"),
                 },
             },
         )
@@ -77,7 +112,6 @@ def try_handle(
 
         body = read_json()
         pref = set_device_preference(str(body.get("preference") or body.get("device") or "auto"))
-        # Force model reload on next chat
         try:
             import doof.api as api_mod
 
@@ -103,6 +137,7 @@ def try_handle(
                     "cuda_devices": hw.get("cuda_devices"),
                     "torch_available": hw.get("torch_available"),
                     "torch_error": hw.get("torch_error"),
+                    "build_kind": hw.get("build_kind"),
                 },
             },
         )
@@ -116,11 +151,34 @@ def try_handle(
         _json(handler, 200, st.as_dict())
         return True
 
+    if path == "/api/updates/status" and method == "GET":
+        from doof.updates import check_for_update, current_version, get_update_settings
+
+        st = check_for_update()
+        _json(
+            handler,
+            200,
+            {
+                "version": current_version(),
+                "settings": get_update_settings(),
+                "check": st.as_dict(),
+            },
+        )
+        return True
+
     if path == "/api/updates/apply" and method == "POST":
         from doof.updates import apply_update, check_for_update
+        from doof.updates.apply_helper import launch_updater
+        from pathlib import Path
+        from doof.paths import user_data_dir
 
         st = check_for_update()
         result = apply_update(st)
+        if result.get("ok") and result.get("needs_restart"):
+            pending = user_data_dir() / "updates" / "pending.json"
+            if pending.is_file():
+                helper = launch_updater(pending)
+                result.update(helper)
         _json(handler, 200 if result.get("ok") else 400, result)
         return True
 
@@ -162,6 +220,13 @@ def try_handle(
             jobs_running = current_job_count()
         except Exception:
             pass
+        hosted = {}
+        try:
+            from doof.cloud.hosted_brain import hosted_health
+
+            hosted = hosted_health()
+        except Exception:
+            hosted = {"available": False}
         _json(
             handler,
             200,
@@ -175,6 +240,7 @@ def try_handle(
                     "accepting": accepting,
                     "jobs_running": jobs_running,
                 },
+                "hosted_brain": hosted,
                 "nodes": nodes[:50],
                 "version": {
                     "client": __version__,
