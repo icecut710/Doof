@@ -1153,6 +1153,30 @@ def _answer_from_memory(prompt: str, memories: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _machine_id() -> str:
+    """Stable per-install id so two PCs never share the node primary key 'local'."""
+    global _local_node_id
+    if _local_node_id:
+        return _local_node_id
+    path = DATA_DIR / "machine_id.txt"
+    try:
+        if path.is_file():
+            mid = path.read_text(encoding="utf-8").strip()
+            if mid:
+                _local_node_id = mid
+                return mid
+    except Exception:
+        pass
+    mid = str(uuid.uuid4())
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(mid, encoding="utf-8")
+    except Exception:
+        pass
+    _local_node_id = mid
+    return mid
+
+
 def get_nodes_with_local() -> list[dict[str, Any]]:
     """Return all nodes, auto-updating the local node entry from hardware()."""
     global _local_node_id
@@ -1164,9 +1188,15 @@ def get_nodes_with_local() -> list[dict[str, Any]]:
     except Exception:
         nodes = []
 
-    # Check if local node exists
-    local_id = "local"
+    # Check if local node exists (unique machine id, never the shared key "local")
+    local_id = _machine_id()
+    host = platform.node() or "Local-PC"
     local_node = next((n for n in nodes if n.get("id") == local_id), None)
+    if local_node is None:
+        local_node = next((n for n in nodes if n.get("name") == host), None)
+        if local_node and local_node.get("id"):
+            local_id = str(local_node["id"])
+            _local_node_id = local_id
 
     gpu_name = "CPU"
     vram_gb = 0.0
@@ -1180,7 +1210,7 @@ def get_nodes_with_local() -> list[dict[str, Any]]:
     now_ts = time.time()
     local_data: dict[str, Any] = {
         "id": local_id,
-        "name": platform.node() or "Local-PC",
+        "name": host,
         "gpu": gpu_name,
         "vram_gb": vram_gb,
         "device": hw.get("device", "cpu"),
@@ -1982,6 +2012,8 @@ class Handler(BaseHTTPRequestHandler):
 
                 if existing:
                     node_data["id"] = existing["id"]
+                else:
+                    node_data["id"] = str(uuid.uuid4())
                 try:
                     saved = db.upsert_node(node_data)
                     saved.setdefault("id", node_data["id"])

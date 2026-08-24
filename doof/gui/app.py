@@ -105,7 +105,8 @@ def start_api_background() -> None:
         try:
             time.sleep(0.3)
             from doof.api import run_server
-            run_server(host="127.0.0.1", port=API_PORT)
+            host = os.environ.get("DOOF_API_HOST", "0.0.0.0")
+            run_server(host=host, port=API_PORT)
         except Exception as e:
             print(f"DOOF API failed: {e}")
 

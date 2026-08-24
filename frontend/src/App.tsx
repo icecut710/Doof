@@ -1617,7 +1617,7 @@ function NetworkTab({ online }: { online: boolean }) {
                   )}
                 </div>
                 <div className="mt-0.5 text-[12px] leading-snug text-zinc-500 break-words">
-                  {node.gpu} · {node.vram_gb > 0 ? `${node.vram_gb} GB VRAM` : node.device.toUpperCase()}
+                  {node.gpu || "CPU"} · {node.vram_gb > 0 ? `${node.vram_gb} GB VRAM` : (node.device || "cpu").toUpperCase()}
                 </div>
               </div>
             </div>
@@ -2241,6 +2241,17 @@ export default function App() {
         .then((hwData) => {
           cacheSet("/api/hardware", hwData);
           setHw(hwData);
+          void api("/api/nodes/register", {
+            method: "POST",
+            body: JSON.stringify({
+              gpu: hwData.cuda_devices?.[0]?.name || (hwData.cuda_available ? "CUDA" : "CPU"),
+              vram_gb: hwData.cuda_devices?.[0]?.total_memory_gb || 0,
+              device: hwData.device || "cpu",
+              cuda_available: Boolean(hwData.cuda_available),
+              platform: hwData.platform,
+              torch_version: hwData.torch_version,
+            }),
+          }).catch(() => {});
         })
         .catch(() => {});
     } catch {
