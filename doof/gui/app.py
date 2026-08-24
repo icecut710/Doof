@@ -67,6 +67,7 @@ def build_frontend() -> bool:
     global DIST
     try:
         from doof.paths import frontend_dist, is_frozen
+
         dist = frontend_dist()
         frozen = is_frozen()
     except Exception:
@@ -85,8 +86,14 @@ def build_frontend() -> bool:
     if not (FRONTEND / "package.json").is_file():
         return False
     try:
-        r = subprocess.run("npm run build", cwd=str(FRONTEND), shell=True,
-                           capture_output=True, text=True, timeout=180)
+        r = subprocess.run(
+            "npm run build",
+            cwd=str(FRONTEND),
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
         if r.returncode != 0:
             print("DOOF: npm build failed")
             return False
@@ -104,7 +111,14 @@ def start_api_background() -> None:
     def run() -> None:
         try:
             time.sleep(0.3)
+            try:
+                from doof.api_mount import install
+
+                install()
+            except Exception as e:
+                print(f"DOOF api_mount: {e}")
             from doof.api import run_server
+
             host = os.environ.get("DOOF_API_HOST", "0.0.0.0")
             run_server(host=host, port=API_PORT)
         except Exception as e:
@@ -128,8 +142,10 @@ def start_static_server(directory: Path, port: int) -> None:
             ".svg": "image/svg+xml; charset=utf-8",
             ".txt": "text/plain; charset=utf-8",
         }
+
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=root, **kwargs)
+
         def log_message(self, format: str, *args) -> None:
             pass
 
@@ -196,7 +212,8 @@ class DOOFWindow(QWidget):
         self.setMaximumSize(self.MAX_W, self.MAX_H)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self._drag_pos: QPoint | None = None
-        self.setStyleSheet("""
+        self.setStyleSheet(
+            """
             QWidget#doof-root { background: #050506; }
             QFrame#titlebar { background: #070708; border-bottom: 1px solid #17171b; }
             QLabel#tb-logo { color: #a78bfa; font-size: 13px; }
@@ -208,7 +225,8 @@ class DOOFWindow(QWidget):
             QPushButton#tb-button:hover { background: #18181b; color: #ffffff; }
             QPushButton#tb-close:hover { background: #ef4444; color: white; }
             QWebEngineView { border: none; background: #050506; }
-            """)
+            """
+        )
         root = QWidget(objectName="doof-root")
         lay = QVBoxLayout(root)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -244,8 +262,11 @@ class DOOFWindow(QWidget):
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event) -> None:
-        if (self._drag_pos is not None and event.buttons() & Qt.MouseButton.LeftButton
-                and not self.isMaximized()):
+        if (
+            self._drag_pos is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and not self.isMaximized()
+        ):
             self.move(event.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, event) -> None:
@@ -265,6 +286,56 @@ class DOOFWindow(QWidget):
             )
 
 
+def _make_splash(app: QApplication):
+    from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
+    from PySide6.QtWidgets import QSplashScreen
+
+    icon_path = ROOT / "assets" / "doof_icon.ico"
+    if not icon_path.is_file():
+        icon_path = ROOT / "assets" / "doof.ico"
+    if icon_path.is_file():
+        app.setWindowIcon(QIcon(str(icon_path)))
+
+    mrn = ROOT / "assets" / "mrnaddaf.png"
+    pix = QPixmap(520, 360)
+    pix.fill(QColor("#050506"))
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    if mrn.is_file():
+        face = QPixmap(str(mrn))
+        if not face.isNull():
+            scaled = face.scaled(
+                120,
+                120,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x = (pix.width() - 120) // 2
+            y = 48
+            p.drawPixmap(x, y, scaled.copy(0, 0, 120, 120))
+    else:
+        p.setPen(QColor("#c4b5fd"))
+        p.setFont(QFont("Segoe UI", 28, QFont.Weight.DemiBold))
+        p.drawText(pix.rect().adjusted(0, -40, 0, 0), int(Qt.AlignmentFlag.AlignCenter), "D")
+    p.setPen(QColor("#a1a1aa"))
+    p.setFont(QFont("Segoe UI", 10))
+    p.drawText(
+        pix.rect().adjusted(0, 100, 0, 0),
+        int(Qt.AlignmentFlag.AlignCenter),
+        "Warming the grill…",
+    )
+    p.end()
+    splash = QSplashScreen(pix)
+    splash.show()
+    splash.showMessage(
+        "Checking the brain…",
+        int(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter),
+        QColor("#a1a1aa"),
+    )
+    app.processEvents()
+    return splash
+
+
 def main() -> int:
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     if os.environ.get("DOOF_SOFTWARE_RENDERING") == "1":
@@ -273,36 +344,9 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("DOOF")
     app.setOrganizationName("DOOF")
-    app.setApplicationVersion("0.2.0")
+    app.setApplicationVersion("0.3.0")
 
-    icon_path = ROOT / "assets" / "doof_icon.ico"
-    if not icon_path.is_file():
-        icon_path = ROOT / "assets" / "doof.ico"
-    splash = None
-    if icon_path.is_file():
-        from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
-        from PySide6.QtWidgets import QSplashScreen
-        app.setWindowIcon(QIcon(str(icon_path)))
-        pix = QPixmap(520, 340)
-        pix.fill(QColor("#050506"))
-        p = QPainter(pix)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(QColor("#c4b5fd"))
-        font = QFont("Segoe UI", 28, QFont.Weight.DemiBold)
-        p.setFont(font)
-        p.drawText(pix.rect().adjusted(0, -24, 0, 0), int(Qt.AlignmentFlag.AlignCenter), "D")
-        p.setPen(QColor("#a1a1aa"))
-        p.setFont(QFont("Segoe UI", 10))
-        p.drawText(pix.rect().adjusted(0, 80, 0, 0), int(Qt.AlignmentFlag.AlignCenter), "Warming up the shawarma machine…")
-        p.end()
-        splash = QSplashScreen(pix)
-        splash.show()
-        splash.showMessage(
-            "Checking the grill…",
-            int(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter),
-            QColor("#a1a1aa"),
-        )
-        app.processEvents()
+    splash = _make_splash(app)
 
     if not build_frontend():
         QMessageBox.critical(
