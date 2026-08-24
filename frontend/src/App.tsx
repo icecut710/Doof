@@ -382,7 +382,28 @@ function StarField() {
    NADDAF ATMOSPHERE
    ========================================================= */
 
+const NADDAF_LOCAL = "./mrnaddaf.png";
+const NADDAF_REMOTE =
+  "https://ekvjdgxpeusdchwrnlww.supabase.co/storage/v1/object/public/doof-assets/mrnaddaf.png";
+
 function NaddafAtmosphere() {
+  // Bundled asset renders immediately — no network wait, no flash, no shift.
+  // Once per launch, a single background attempt may adopt the canonical
+  // Supabase copy; on any failure we silently keep the bundled one.
+  const [src, setSrc] = useState(NADDAF_LOCAL);
+  useEffect(() => {
+    let alive = true;
+    fetch(NADDAF_REMOTE, { mode: "cors", cache: "force-cache" })
+      .then((r) => (r.ok ? r.blob() : null))
+      .then((blob) => {
+        if (alive && blob) setSrc(URL.createObjectURL(blob));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
       <StarField />
@@ -399,16 +420,16 @@ function NaddafAtmosphere() {
           }}
         >
           <img
-            src="./mrnaddaf.png"
+            src={src}
             alt=""
             draggable={false}
-            className="h-full w-full scale-105 object-contain object-center blur-[10px] opacity-[0.18] saturate-[0.85]"
+            className="h-full w-full scale-105 object-contain object-center blur-[4px] opacity-[0.34] saturate-[0.9]"
           />
         </div>
       </div>
 
-      {/* Dark overlay — cinematic but the portrait stays visible */}
-      <div className="absolute inset-0 bg-black/[0.82]" />
+      {/* Dark overlay — readable text, recognizable scene behind it */}
+      <div className="absolute inset-0 bg-black/[0.72]" />
 
       {/* Violet center glow */}
       <div className="absolute left-1/2 top-1/2 h-[480px] w-[480px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-violet-700/[0.065] blur-[140px]" />
