@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "published_at": "2026-08-24T20:00:00Z",
+  "channels": {
+    "stable": "0.3.0",
+    "beta": "0.3.0"
+  },
+  "releases": [
+    {
+      "version": "0.3.0",
+      "channel": "stable",
+      "platform": "windows",
+      "architecture": "x86_64",
+      "mandatory": false,
+      "min_supported": "0.2.0",
+      "notes_human": "Network expansion, automatic updates, and a Control Room for owners. Contribution stays off by default.",
+      "notes": "- Global Supabase job queue (LAN optional)\n- Auto-update client with SHA-256 verification\n- Admin Control Room (role-gated)\n- Expanded compute contribution limits\n- UI polish + personality pass",
+      "download_url": "",
+      "sha256": "",
+      "published_at": "2026-08-24T20:00:00Z",
+      "kind": "full"
+    }
+  ]
+}
