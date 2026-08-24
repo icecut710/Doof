@@ -22,7 +22,7 @@ from doof.compute.jobs import JobRejected, validate_payload
 from doof.compute.scheduler import select_node
 from doof.errors import public_error
 from doof.personality import pick
-from doof.runtime import import_torch, probe_hardware, torch_error
+from doof.runtime import import_torch, torch_error
 
 _worker_started = False
 _worker_lock = threading.Lock()
@@ -41,7 +41,6 @@ def _now() -> str:
 
 
 def _settings() -> dict[str, Any]:
-    """Contribute-compute consent. Default: do not accept remote jobs."""
     defaults = {
         "accepting_jobs": False,
         "accept_cpu": True,
@@ -86,7 +85,6 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
 
 
 def execute_local(job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Run an allowed job on this process. Never exec() user code."""
     settings = _settings()
     if job_type == "train" and not settings.get("allow_train", False):
         raise JobRejected("training contribution is disabled on this node")
@@ -122,27 +120,30 @@ def _hash_embed(text: str) -> list[float]:
 
 
 def _local_inference(data: dict[str, Any]) -> dict[str, Any]:
+    """Actual AI path: memory is context, model is the brain."""
+    from doof.brain import build_prompt, lightweight_answer, postprocess_model_text
+
     prompt = data["prompt"]
     memories: list[dict[str, Any]] = []
-    augmented = prompt
     try:
-        from doof.intelligence.rag import build_context, retrieve_memories
+        from doof.intelligence.rag import retrieve_memories
 
         memories = retrieve_memories(prompt, top_k=5)
-        if memories:
-            augmented = f"{build_context(memories)}\n\nUser: {prompt}\nDOOF:"
-            try:
-                from doof.intelligence.store import get_store
+        try:
+            from doof.intelligence.store import get_store
 
-                store = get_store()
-                for mem in memories:
-                    store.increment_usage(mem["id"])
-            except Exception:
-                pass
+            store = get_store()
+            for mem in memories:
+                store.increment_usage(mem["id"])
+        except Exception:
+            pass
     except Exception:
         memories = []
 
+    augmented = build_prompt(prompt, memories)
     torch = import_torch()
+    torch_fail: BaseException | None = None
+
     if torch is not None:
         try:
             from doof.api import get_inf
@@ -156,39 +157,32 @@ def _local_inference(data: dict[str, Any]) -> dict[str, Any]:
             )
             if text.startswith(augmented):
                 text = text[len(augmented) :].lstrip()
-            from doof.api import _looks_weak, _answer_from_memory
-
-            if _looks_weak(text):
-                text = _answer_from_memory(prompt, memories)
+            text = postprocess_model_text(text, prompt, memories)
             return {
                 "ok": True,
                 "text": text,
                 "provider": "local_model",
+                "device": getattr(inf, "device_label", None) or str(getattr(inf, "device", "")),
                 "memories_used": memories,
             }
         except Exception as e:
             torch_fail = e
-        else:
-            torch_fail = None
-    else:
-        torch_fail = RuntimeError(torch_error() or "torch unavailable")
 
     cloud = _cloud_inference(prompt, memories)
     if cloud is not None:
         cloud["memories_used"] = memories
-        cloud["fallback_of"] = str(torch_fail)
+        if torch_fail:
+            cloud["fallback_of"] = str(torch_fail)
         return cloud
-
-    from doof.api import _answer_from_memory
 
     label, detail = pick("ai_fallback")
     return {
         "ok": True,
-        "text": _answer_from_memory(prompt, memories),
-        "provider": "memory",
+        "text": lightweight_answer(prompt, memories),
+        "provider": "lightweight",
         "memories_used": memories,
         "notice": {"title": label, "detail": detail},
-        "fallback_of": str(torch_fail),
+        "fallback_of": str(torch_fail or torch_error() or "model unavailable"),
     }
 
 
@@ -196,14 +190,9 @@ def _cloud_inference(prompt: str, memories: list[dict[str, Any]]) -> dict[str, A
     key = os.environ.get("XAI_API_KEY") or os.environ.get("DOOF_XAI_API_KEY")
     if not key:
         return None
-    facts = [str(m.get("content") or "") for m in memories if m.get("content")]
-    system = (
-        "You are DOOF, a dry, loyal private AI. Be concise. "
-        "Take shawarmas and Lebanon seriously, but never drown the answer in jokes. "
-        "If shared memory is provided, prefer it over guessing."
-    )
-    if facts:
-        system += "\nShared memory:\n- " + "\n- ".join(facts[:8])
+    from doof.brain import build_system_preamble
+
+    system = build_system_preamble(memories)
     body = json.dumps(
         {
             "model": os.environ.get("DOOF_XAI_MODEL", "grok-4.5"),
@@ -263,16 +252,10 @@ def dispatch_inference(
     local_id: str | None = None,
     token: str | None = None,
 ) -> dict[str, Any]:
-    """Route a chat job. Remote if a better willing node exists, else local.
-
-    Global path: Supabase queue + outbound poll (works across NATs).
-    LAN path: direct HTTP when lan_url is reachable (optimization only).
-    """
     try:
         from doof.admin import pool_paused
 
         if pool_paused():
-            # Admin paused the pool — force local only
             nodes = [n for n in (nodes or []) if n.get("is_local")]
     except Exception:
         pass
@@ -303,7 +286,6 @@ def dispatch_inference(
                 remote["provider"] = remote.get("provider") or "remote"
                 used_remote = True
                 return remote
-        # Global / NAT path — enqueue on Supabase control plane
         queued = _enqueue("inference", payload, worker=str(target.get("id")), requester=local_id)
         if queued:
             result = _wait_job(queued.get("id"), timeout=40)
@@ -375,7 +357,6 @@ def _wait_job(job_id: str | None, timeout: float) -> dict[str, Any] | None:
 
 
 def start_worker_loop(local_id_fn, execute_fn=None) -> None:
-    """Poll for jobs assigned to this node. Outbound — NAT friendly."""
     global _worker_started
     with _worker_lock:
         if _worker_started:
