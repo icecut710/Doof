@@ -4,7 +4,7 @@ cd /d "%~dp0\.."
 
 echo.
 echo  ============================================
-echo   DOOF v0.2 — friend-ready onedir build
+echo   DOOF v0.3 — friend-ready onedir build
 echo  ============================================
 echo.
 
@@ -29,8 +29,11 @@ if errorlevel 1 (
 )
 
 REM Friend builds default to CPU torch (~600-800MB) instead of CUDA (~5GB).
-REM Set DOOF_KEEP_CUDA=1 to keep a CUDA wheel for owner-machine builds.
-if not defined DOOF_KEEP_CUDA (
+REM Owner GPU builds: set DOOF_KEEP_CUDA=1 before running this script,
+REM and ensure a CUDA torch wheel is already installed in the venv.
+if defined DOOF_KEEP_CUDA (
+  echo [build] DOOF_KEEP_CUDA=1 — keeping existing torch (use CUDA wheel for GPU EXE)
+) else (
   echo [build] Installing CPU-only torch for a shareable EXE
   python -m pip uninstall -y torch
   python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -47,6 +50,7 @@ if errorlevel 1 (
 echo.
 echo  DONE. Output: dist\DOOF\DOOF.exe
 echo  Read:         dist\DOOF\README_FIRST.txt
-echo  Zip the whole dist\DOOF folder to share.
+echo  Zip the whole dist\DOOF folder (EXE + _internal) to share.
+echo  GPU owner rebuild: set DOOF_KEEP_CUDA=1 and install cu124 torch first.
 echo.
 exit /b 0
