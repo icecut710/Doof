@@ -322,8 +322,14 @@ def verify_package(exe: Path, commit: str) -> None:
         "4. Enable Google provider under Authentication → Providers\n"
         "   (Client ID / Secret from Google Cloud Console)\n\n"
         "5. Double-click DOOF.exe\n\n"
+        "SHARING WITH FRIENDS\n"
+        "Zip the ENTIRE dist\\DOOF folder (DOOF.exe AND the _internal folder).\n"
+        "Sending only DOOF.exe causes 'python DLL not found'.\n"
+        "Friend machines do not need Python or Node installed.\n\n"
         "Google button appears only when SUPABASE_URL + SUPABASE_ANON_KEY are set.\n"
-        "Email confirmation links must be opened on this same PC (DOOF is listening).\n",
+        "Email confirmation links must be opened on this same PC (DOOF is listening).\n"
+        "Standalone EXEs do not see each other unless they join the same API host\n"
+        "or share the same Supabase project.\n",
         encoding="utf-8",
     )
     print(f"[build] wrote {readme}")

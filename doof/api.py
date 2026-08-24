@@ -49,6 +49,7 @@ import json
 import os
 import platform
 import re
+import sys
 import threading
 import time
 import traceback
@@ -58,11 +59,30 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-try:
-    from dotenv import load_dotenv
-
+def _load_env() -> None:
+    """Load .env from EXE dir, %LOCALAPPDATA%/DOOF, then cwd. Never require a repo checkout."""
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        return
+    candidates: list[Path] = []
+    try:
+        from doof.paths import is_frozen, user_data_dir
+        if is_frozen():
+            candidates.append(Path(sys.executable).resolve().parent / ".env")
+            candidates.append(user_data_dir() / ".env")
+    except Exception:
+        pass
+    candidates.append(Path.cwd() / ".env")
+    for p in candidates:
+        if p.is_file():
+            load_dotenv(p)
+            return
     load_dotenv()
-except Exception:  # dotenv optional in frozen builds
+
+try:
+    _load_env()
+except Exception:
     pass
 
 from database import get_db
@@ -71,19 +91,25 @@ from database import get_db
 # Paths
 # ---------------------------------------------------------------------------
 
-ROOT = Path(__file__).resolve().parents[1]
-CKPT_DIR = ROOT / "checkpoints"
-DATA_DIR = ROOT / "data"
+try:
+    from doof.paths import bundle_root, user_data_dir, checkpoints_dir, is_frozen
+    ROOT = bundle_root()
+    DATA_DIR = user_data_dir()
+    CKPT_DIR = checkpoints_dir()
+    _FROZEN = is_frozen()
+except Exception:
+    ROOT = Path(__file__).resolve().parents[1]
+    DATA_DIR = ROOT / "data"
+    CKPT_DIR = ROOT / "checkpoints"
+    _FROZEN = False
+
 TRAIN = DATA_DIR / "train.txt"
 KNOW = DATA_DIR / "knowledge.json"
 SETT = DATA_DIR / "settings.json"
 NODES_PATH = DATA_DIR / "nodes.json"
 VERSIONS_PATH = DATA_DIR / "brain_versions.json"
-VERSIONS_PATH = DATA_DIR / "brain_versions.json"
 PROFILES_PATH = DATA_DIR / "profiles.json"
 SESSIONS_PATH = DATA_DIR / "sessions.json"
-
-# Heartbeat thread interval (seconds)
 
 # Heartbeat thread interval (seconds)
 _HEARTBEAT_INTERVAL = 30
@@ -116,9 +142,6 @@ _settings = {
     "top_k": 50,
     "context_length": 64,
 }
-
-# Local node identity (set on first registration / heartbeat)
-_local_node_id: str | None = None
 
 # Local node identity (set on first registration / heartbeat)
 _local_node_id: str | None = None
@@ -1072,6 +1095,64 @@ def _save_nodes(nodes: list[dict[str, Any]]) -> None:
             pass
 
 
+
+def _seed_train_txt() -> None:
+    """Copy bundled train.txt into the writable user-data dir on first run."""
+    dest = DATA_DIR / "train.txt"
+    if dest.is_file() and dest.stat().st_size > 20:
+        return
+    for src in (
+        ROOT / "data_seed" / "train.txt",
+        ROOT / "data" / "train.txt",
+        Path(__file__).resolve().parents[1] / "data" / "train.txt",
+    ):
+        if src.is_file():
+            try:
+                dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            except Exception:
+                pass
+            return
+
+
+def _dedupe_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for n in nodes:
+        nid = str(n.get("id") or n.get("name") or "")
+        if not nid or nid in seen:
+            continue
+        seen.add(nid)
+        out.append(n)
+    return out
+
+
+def _looks_weak(text: str) -> bool:
+    t = (text or "").strip()
+    if len(t) < 12:
+        return True
+    letters = sum(ch.isalpha() for ch in t)
+    if letters < max(8, int(len(t) * 0.35)):
+        return True
+    low = t.lower()
+    if low.count("kaeden likes") >= 2 and len(t) < 240:
+        return True
+    return False
+
+
+def _answer_from_memory(prompt: str, memories: list[dict[str, Any]]) -> str:
+    facts = [str(m.get("content") or "").strip() for m in memories if m.get("content")]
+    facts = [f for f in facts if f]
+    if not facts:
+        return (
+            "I do not have that in memory yet. Add it in Memory, then train, "
+            "and the shared brain will keep it."
+        )
+    lines = ["From shared memory:"]
+    for f in facts[:6]:
+        lines.append(f"- {f}")
+    return "\n".join(lines)
+
+
 def get_nodes_with_local() -> list[dict[str, Any]]:
     """Return all nodes, auto-updating the local node entry from hardware()."""
     global _local_node_id
@@ -1150,7 +1231,7 @@ def get_nodes_with_local() -> list[dict[str, Any]]:
     except Exception:
         pass
 
-    return nodes
+    return _dedupe_nodes(nodes)
 
 
 def _mark_local_node_training(training: bool) -> None:
@@ -1716,6 +1797,8 @@ class Handler(BaseHTTPRequestHandler):
                 text = inf.generate(augmented_prompt, max_new_tokens=mx, temperature=temp, top_k=tk)
                 if text.startswith(augmented_prompt):
                     text = text[len(augmented_prompt):].lstrip()
+                if _looks_weak(text):
+                    text = _answer_from_memory(prompt, memories_used)
 
                 _json(
                     self,
@@ -2124,6 +2207,7 @@ def _start_heartbeat() -> None:
 def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _seed_train_txt()
 
     if SETT.exists():
         try:

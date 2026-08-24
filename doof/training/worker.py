@@ -30,9 +30,14 @@ from typing import Any
 
 from doof import __version__
 
-ROOT = Path(__file__).resolve().parents[2]
+try:
+    from doof.paths import bundle_root, user_data_dir
+    ROOT = bundle_root()
+    DATA_DIR = user_data_dir()
+except Exception:
+    ROOT = Path(__file__).resolve().parents[2]
+    DATA_DIR = ROOT / "data"
 CKPT_DIR = ROOT / "checkpoints"
-DATA_DIR = ROOT / "data"
 
 
 def _hardware_summary() -> dict[str, Any]:

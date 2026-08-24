@@ -17,8 +17,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = ROOT / "data"
+try:
+    from doof.paths import bundle_root, user_data_dir
+    ROOT = bundle_root()
+    DATA_DIR = user_data_dir()
+except Exception:
+    ROOT = Path(__file__).resolve().parents[2]
+    DATA_DIR = ROOT / "data"
 DATASETS_DIR = ROOT / "datasets"
 FEEDBACK_PATH = DATA_DIR / "feedback.json"
 TRAIN_TXT = DATA_DIR / "train.txt"

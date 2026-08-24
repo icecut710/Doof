@@ -123,10 +123,15 @@ Schema: `supabase/migrations/001_doof_schema.sql` + `002_doof_v02_network.sql`
 
 A full offline installer with bundled runtime is **not** produced from every environment. From a Windows machine with the stack installed:
 
-```bash
-pip install pyinstaller
-pyinstaller --noconfirm packaging/doof.spec
+Use the deterministic pipeline (builds the frontend, then the EXE):
+
+```bat
+packaging\build.bat
 ```
+
+Zip the **entire** `dist\DOOF` folder (`DOOF.exe` **and** `_internal`). Sending only the EXE causes a missing Python DLL on friends' PCs. Friend machines do not need Python or Node.
+
+Default friend builds use CPU torch so the zip is hundreds of MB, not 5 GB. Set `DOOF_KEEP_CUDA=1` before `build.bat` if you need a CUDA owner build.
 
 Packaging goal: `DOOF.exe` + `DOOF Setup.exe` with frontend, backend, runtime — no separate Python/Node install for end users.
 

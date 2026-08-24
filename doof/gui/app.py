@@ -117,6 +117,16 @@ def start_static_server(directory: Path, port: int) -> None:
     root = str(directory.resolve())
 
     class QuietHandler(http.server.SimpleHTTPRequestHandler):
+        extensions_map = {
+            **http.server.SimpleHTTPRequestHandler.extensions_map,
+            ".html": "text/html; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".mjs": "application/javascript; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".json": "application/json; charset=utf-8",
+            ".svg": "image/svg+xml; charset=utf-8",
+            ".txt": "text/plain; charset=utf-8",
+        }
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=root, **kwargs)
         def log_message(self, format: str, *args) -> None:
@@ -151,7 +161,7 @@ class TitleBar(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 0, 0)
         layout.setSpacing(8)
-        logo = QLabel("◆")
+        logo = QLabel("D")
         logo.setObjectName("tb-logo")
         title = QLabel("DOOF")
         title.setObjectName("tb-title")

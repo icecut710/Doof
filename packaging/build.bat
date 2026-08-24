@@ -28,6 +28,14 @@ if errorlevel 1 (
   python -m pip install pyinstaller python-dotenv
 )
 
+REM Friend builds default to CPU torch (~600-800MB) instead of CUDA (~5GB).
+REM Set DOOF_KEEP_CUDA=1 to keep a CUDA wheel for owner-machine builds.
+if not defined DOOF_KEEP_CUDA (
+  echo [build] Installing CPU-only torch for a shareable EXE
+  python -m pip uninstall -y torch
+  python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+)
+
 echo [build] Running packaging\build_exe.py ...
 python packaging\build_exe.py
 if errorlevel 1 (

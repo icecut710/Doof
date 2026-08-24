@@ -18,10 +18,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
+try:
+    from doof.paths import bundle_root, user_data_dir
+    ROOT = bundle_root()
+    DATA_DIR = user_data_dir()
+except Exception:
+    ROOT = Path(__file__).resolve().parents[2]
+    DATA_DIR = ROOT / "data"
 DATASETS_DIR = ROOT / "datasets"
 CKPT_DIR = ROOT / "checkpoints"
-EVAL_LOG = ROOT / "data" / "eval_log.json"
+EVAL_LOG = DATA_DIR / "eval_log.json"
 
 
 def _load_val_examples(val_path: str | Path | None = None) -> list[str]:

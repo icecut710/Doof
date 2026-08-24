@@ -26,8 +26,14 @@ from typing import Any, Callable
 
 from database import get_db
 
-ROOT = Path(__file__).resolve().parents[2]
-JOBS_PATH = ROOT / "data" / "jobs.json"
+try:
+    from doof.paths import bundle_root, user_data_dir
+    ROOT = bundle_root()
+    DATA_DIR = user_data_dir()
+except Exception:
+    ROOT = Path(__file__).resolve().parents[2]
+    DATA_DIR = ROOT / "data"
+JOBS_PATH = DATA_DIR / "jobs.json"
 
 
 class JobStatus(str, enum.Enum):

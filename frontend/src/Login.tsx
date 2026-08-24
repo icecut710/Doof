@@ -197,7 +197,7 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
         <div className="rounded-3xl border border-white/[0.06] bg-[#09090b]/92 p-6 shadow-[0_20px_70px_rgba(0,0,0,0.5),0_0_50px_rgba(124,58,237,0.06)] backdrop-blur-md">
           <div className="mb-5 text-center">
             <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl border border-violet-400/20 bg-violet-500/[0.07] text-[16px] font-bold text-violet-300 shadow-[0_0_30px_rgba(124,58,237,0.18)]">
-              ◆
+              D
             </div>
             <h1 className="mt-3 text-[18px] font-semibold tracking-tight text-zinc-100">DOOF</h1>
             <p className="mt-0.5 text-[9px] uppercase tracking-[0.22em] text-zinc-600">

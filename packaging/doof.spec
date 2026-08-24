@@ -42,9 +42,10 @@ def _datas():
         (ROOT / "checkpoints", "checkpoints"),
         (ROOT / "database", "database"),
     ]
-    data_dir = ROOT / "data"
-    if data_dir.is_dir():
-        pairs.append((data_dir, "data_seed"))
+    # Only seed train.txt — never the restore junk / b64 dumps in data/
+    train = ROOT / "data" / "train.txt"
+    if train.is_file():
+        pairs.append((train, "data_seed"))
 
     env_example = ROOT / ".env.example"
     if env_example.is_file():
@@ -115,6 +116,13 @@ a = Analysis(
         "IPython",
         "notebook",
         "pytest",
+        "nvidia",
+        "triton",
+        "torch.distributed",
+        "torch.testing",
+        "torch.utils.tensorboard",
+        "sympy",
+        "networkx",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

@@ -13,8 +13,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_PATH = ROOT / "data" / "memories.json"
+try:
+    from doof.paths import user_data_dir
+    DEFAULT_PATH = user_data_dir() / "memories.json"
+except Exception:
+    DEFAULT_PATH = Path(__file__).resolve().parents[2] / "data" / "memories.json"
 
 IMPORTANCE_LEVELS = {"low", "medium", "high"}
 

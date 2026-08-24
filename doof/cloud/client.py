@@ -4,8 +4,13 @@ import json, os
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = ROOT / "data" / "cloud.json"
+try:
+    from doof.paths import user_data_dir, bundle_root
+    ROOT = bundle_root()
+    CONFIG_PATH = user_data_dir() / "cloud.json"
+except Exception:
+    ROOT = Path(__file__).resolve().parents[2]
+    CONFIG_PATH = ROOT / "data" / "cloud.json"
 
 def _load_config() -> dict[str, Any]:
     cfg: dict[str, Any] = {

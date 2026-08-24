@@ -122,7 +122,16 @@ _NODES = DATA / "nodes.json"
 
 
 def get_nodes() -> list[dict[str, Any]]:
-    return _read(_NODES)
+    items = _read(_NODES)
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for n in items:
+        nid = str(n.get("id") or "")
+        if not nid or nid in seen:
+            continue
+        seen.add(nid)
+        out.append(n)
+    return out
 
 
 def upsert_node(node: dict[str, Any]) -> dict[str, Any]:
