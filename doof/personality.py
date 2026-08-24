@@ -111,15 +111,19 @@ _LINES: dict[str, list[tuple[str, str]]] = {
     "auth_google_off": [
         ("No Google tonight", "Google sign-in is not configured on this brain."),
     ],
+    "update_ready": [
+        ("DOOF got less stupid", "A newer version is available."),
+    ],
+    "update_current": [
+        ("Shawarmas are current", "You are on the latest compatible release."),
+    ],
+    "update_failed": [
+        ("The upgrade order fell through", "Your current version is unchanged."),
+    ],
 }
 
 
 def pick(kind: str, *, seed: str | None = None) -> tuple[str, str]:
-    """Return (primary, technical) for a stable category.
-
-    Meaning is never randomized — only the wording. Pass *seed* to keep the
-    same line for a session (status strip) instead of flickering.
-    """
     options = _LINES.get(kind) or _LINES["errors"]
     if seed is None:
         return options[0]
@@ -137,7 +141,6 @@ def boot_copy(phase: str) -> tuple[str, str]:
         "ready": "healthy",
         "failed": "offline",
     }
-    # Prefer the ordered loading lines by phase index.
     order = ["runtime", "database", "cloud", "ai", "network", "ready"]
     lines = _LINES["loading"]
     if phase == "failed":

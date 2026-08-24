@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller onedir spec for DOOF v0.2 — friend-ready Windows EXE.
+"""PyInstaller onedir spec for DOOF v0.3 — friend-ready Windows EXE.
 
 Output:
   dist/DOOF/DOOF.exe
@@ -12,8 +12,6 @@ Build (from repo root, on Windows):
 
 from pathlib import Path
 
-# SPECPATH is the *directory* containing this .spec (not the file path).
-# packaging/ → project root is the parent.
 _spec = Path(SPECPATH).resolve()
 _candidates = [
     _spec.parent if _spec.name.lower() == "packaging" else None,
@@ -41,8 +39,8 @@ def _datas():
         (ROOT / "assets", "assets"),
         (ROOT / "checkpoints", "checkpoints"),
         (ROOT / "database", "database"),
+        (ROOT / "releases", "releases"),
     ]
-    # Only seed train.txt — never the restore junk / b64 dumps in data/
     train = ROOT / "data" / "train.txt"
     if train.is_file():
         pairs.append((train, "data_seed"))
@@ -67,6 +65,7 @@ a = Analysis(
     hiddenimports=[
         "doof",
         "doof.api",
+        "doof.api_extra",
         "doof.paths",
         "doof.gui",
         "doof.gui.app",
@@ -93,6 +92,9 @@ a = Analysis(
         "doof.runtime",
         "doof.errors",
         "doof.personality",
+        "doof.updates",
+        "doof.updates.client",
+        "doof.admin",
         "dotenv",
         "PySide6",
         "PySide6.QtCore",
@@ -111,6 +113,7 @@ a = Analysis(
         "uuid",
         "threading",
         "socket",
+        "zipfile",
     ],
     hookspath=[],
     hooksconfig={},
