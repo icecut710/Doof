@@ -38,16 +38,11 @@ class Store:
         self._items: dict[str, dict[str, Any]] = {}
         self._load()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _load(self) -> None:
         if self._path.exists():
             try:
                 raw = json.loads(self._path.read_text(encoding="utf-8"))
                 if isinstance(raw, list):
-                    # Migrate from old list format
                     self._items = {item["id"]: item for item in raw if "id" in item}
                 elif isinstance(raw, dict):
                     self._items = raw
@@ -64,10 +59,6 @@ class Store:
     def _now(self) -> str:
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def add(
         self,
         content: str,
@@ -77,6 +68,7 @@ class Store:
         category: str = "general",
         tags: list[str] | None = None,
         approved: bool = True,
+        training_status: str = "none",
     ) -> dict[str, Any]:
         """Add a new memory item.  Returns the created item."""
         importance = importance if importance in IMPORTANCE_LEVELS else "medium"
@@ -90,6 +82,7 @@ class Store:
             "tags": tags or [],
             "usage_count": 0,
             "approved": approved,
+            "training_status": training_status,
         }
         with self._lock:
             self._items[item["id"]] = item
@@ -110,7 +103,7 @@ class Store:
 
     def update(self, item_id: str, **fields: Any) -> dict[str, Any] | None:
         """Update allowed fields on an existing memory item."""
-        allowed = {"content", "importance", "category", "tags", "approved"}
+        allowed = {"content", "importance", "category", "tags", "approved", "training_status", "training_example_id"}
         with self._lock:
             if item_id not in self._items:
                 return None
@@ -173,7 +166,6 @@ class Store:
             ]
 
 
-# Module-level singleton
 _store: Store | None = None
 _store_lock = threading.Lock()
 
