@@ -1,36 +1,53 @@
-.venv/
+# Byte-compiled / cache
 __pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
-.env
-.env.*
-!.env.example
-node_modules/
-frontend/node_modules/
-*.egg-info/
+*.py[cod]
+*$py.class
+*.so
+.Python
 build/
+develop-eggs/
 dist/
-frontend/dist/assets/
-*.safetensors
-.DS_Store
-PUSH_TEST.md
-data/cloud.json
-data/settings.json
-data/knowledge.json
-data/training_jobs.json
-data/nodes.json
-data/approved_examples.json
-data/brain_versions.json
-data/memories.json
-data/jobs.json
-checkpoints/doof_step_*.pt
-doof/Doof/
-frontend/Doof/
-# keep doof_v01.pt optional; large — prefer train locally
-data/profiles.json
-data/sessions.json
-data/machine_id.txt
-data/compute_jobs.json
-data/compute_settings.json
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
+# Virtual envs
+.venv/
+venv/
+ENV/
+
+# Env / secrets — never commit
+.env
+.env.local
+*.pem
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Node
+node_modules/
+frontend/dist/
+
+# DOOF runtime user data (local only)
+data/*.json
+data/machine_id.txt
+data/device_settings.json
+data/reward_ledger.json
+
+# Torch / models local cache noise
+*.pt.bak
+
+# OS
+.DS_Store
+Thumbs.db

@@ -39,7 +39,6 @@ def _save(rows: list[dict[str, Any]]) -> None:
     path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
 
 
-# Base units: internal Naddaf credit (not a market price claim)
 _RATES = {
     "inference": 1.0,
     "embedding": 0.5,
@@ -71,7 +70,7 @@ def record_job_reward(
         return None
     rows = _load()
     if any(r.get("job_id") == job_id and r.get("status") != "reversed" for r in rows):
-        return None  # duplicate
+        return None
     amount = estimate_reward(job_type, device=device, duration_s=duration_s)
     if amount <= 0:
         return None
@@ -84,7 +83,7 @@ def record_job_reward(
         "device": device,
         "duration_s": round(duration_s, 3),
         "amount": amount,
-        "status": "pending",  # pending until admin/server approval
+        "status": "pending",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "approved_at": None,
         "paid_at": None,
@@ -93,7 +92,6 @@ def record_job_reward(
     }
     rows.append(entry)
     _save(rows)
-    # Best-effort cloud mirror
     try:
         from database import get_db
         db = get_db()
