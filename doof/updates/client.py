@@ -38,6 +38,40 @@ class UpdateStatus:
 def current_version() -> str:
     return INSTALLED
 
+def get_update_settings() -> dict[str, Any]:
+    """Persisted auto-update preferences (channel, check-on-start)."""
+    defaults = {
+        "channel": "stable",
+        "check_on_start": True,
+        "manifest_url": DEFAULT_MANIFEST_URL,
+    }
+    try:
+        from doof.paths import user_data_dir
+        path = user_data_dir() / "update_settings.json"
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                defaults.update({k: data[k] for k in defaults if k in data})
+    except Exception:
+        pass
+    return defaults
+
+
+def save_update_settings(update: dict[str, Any]) -> dict[str, Any]:
+    cur = get_update_settings()
+    for k in list(cur):
+        if k in update:
+            cur[k] = update[k]
+    try:
+        from doof.paths import user_data_dir
+        path = user_data_dir() / "update_settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cur, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return cur
+
+
 def _parse_ver(v: str) -> tuple[int, ...]:
     parts = []
     for p in (v or "0").strip().lstrip("vV").split("."):
@@ -75,6 +109,8 @@ def check_for_update(*, channel: str | None = None, force: bool = False) -> Upda
         status.min_supported = best.get("min_supported")
         status.mandatory = bool(best.get("mandatory"))
         status.incompatible = bool(status.min_supported and _newer(status.min_supported, INSTALLED))
+        if status.incompatible:
+            status.mandatory = True
         status.available = status.incompatible or bool(status.latest and _newer(status.latest, INSTALLED))
     except Exception as exc:
         status.error = f"Could not reach update server: {type(exc).__name__}"
