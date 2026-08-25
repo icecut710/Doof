@@ -1,10 +1,7 @@
 {
   "schema": 1,
-  "published_at": "2026-08-24T20:00:00Z",
-  "channels": {
-    "stable": "0.3.0",
-    "beta": "0.3.0"
-  },
+  "published_at": "2026-08-25T14:45:00Z",
+  "channels": {"stable": "0.3.0", "beta": "0.3.0"},
   "releases": [
     {
       "version": "0.3.0",
@@ -13,11 +10,11 @@
       "architecture": "x86_64",
       "mandatory": false,
       "min_supported": "0.2.0",
-      "notes_human": "Network expansion, automatic updates, and a Control Room for owners. Contribution stays off by default.",
-      "notes": "- Global Supabase job queue (LAN optional)\n- Auto-update client with SHA-256 verification\n- Admin Control Room (role-gated)\n- Expanded compute contribution limits\n- UI polish + personality pass",
+      "notes_human": "DOOF v0.3 production pass: network compute, verified updates, Control Room, contribution controls, and UI polish.",
+      "notes": "Global Supabase job queue; SHA-256 update verification; role-gated admin controls; expanded contribution limits; UI polish.",
       "download_url": "",
       "sha256": "",
-      "published_at": "2026-08-24T20:00:00Z",
+      "published_at": "2026-08-25T14:45:00Z",
       "kind": "full"
     }
   ]
