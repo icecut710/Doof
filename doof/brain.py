@@ -114,7 +114,7 @@ def lightweight_answer(prompt: str, memories: list[dict[str, Any]] | None = None
             "I will use them. Otherwise, tell me what aspect you care about."
         )
 
-    m = re.search(r"(\d+)\s*[×x*]\s*(\d+)", ql)
+    m = re.search(r"(\d+)\s*(?:[×x*]|times)\s*(\d+)", ql)
     if m:
         a, b = int(m.group(1)), int(m.group(2))
         return str(a * b)
