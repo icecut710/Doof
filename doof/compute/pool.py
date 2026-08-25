@@ -187,41 +187,10 @@ def _local_inference(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cloud_inference(prompt: str, memories: list[dict[str, Any]]) -> dict[str, Any] | None:
-    key = os.environ.get("XAI_API_KEY") or os.environ.get("DOOF_XAI_API_KEY")
-    if not key:
-        return None
-    from doof.brain import build_system_preamble
-
-    system = build_system_preamble(memories)
-    body = json.dumps(
-        {
-            "model": os.environ.get("DOOF_XAI_MODEL", "grok-4.5"),
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": 240,
-            "temperature": 0.7,
-        }
-    ).encode()
-    req = Request(
-        "https://api.x.ai/v1/chat/completions",
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {key}",
-        },
-        method="POST",
-    )
+    """Project-owned DOOF hosted brain only — never third-party providers."""
     try:
-        with urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read())
-        text = (
-            ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-        ).strip()
-        if not text:
-            return None
-        return {"ok": True, "text": text, "provider": "cloud"}
+        from doof.compute.cloud_inference import hosted_or_none
+        return hosted_or_none(prompt, memories)
     except Exception:
         return None
 
@@ -440,6 +409,19 @@ def _poll_once(local_id_fn, execute_fn) -> None:
         result = execute_fn(claimed.get("type") or "inference", claimed.get("payload") or {})
         if hasattr(db, "update_compute_job"):
             db.update_compute_job(jid, status="done", result=result, finished_at=_now())
+            try:
+                from doof.rewards import record_job_reward
+                record_job_reward(
+                    user_id=str(claimed.get("created_by") or claimed.get("requester_node") or "local"),
+                    node_id=str(claimed.get("worker_node") or "local"),
+                    job_id=str(jid),
+                    job_type=str(claimed.get("type") or "inference"),
+                    device=str((result or {}).get("device") or "cpu"),
+                    duration_s=0.0,
+                    verified=True,
+                )
+            except Exception:
+                pass
         elif hasattr(db, "update_training_job"):
             db.update_training_job(jid, status="done", result=result, finished_at=_now())
     except Exception as e:
