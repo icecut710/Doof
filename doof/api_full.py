@@ -1,8 +1,7 @@
-"""Full DOOF HTTP API implementation (assembled from _af*.txt segments)."""
+"""Full DOOF HTTP API (zlib+base64 body in _api_full.z64)."""
 from __future__ import annotations
+import base64, zlib
 from pathlib import Path
-_parts = sorted(Path(__file__).resolve().parent.glob("_af*.txt"))
-if not _parts:
-    raise ImportError("DOOF api_full segments (_af*.txt) missing")
-_code = "".join(p.read_text(encoding="utf-8") for p in _parts)
+_blob = Path(__file__).resolve().parent / "_api_full.z64"
+_code = zlib.decompress(base64.b64decode(_blob.read_text(encoding="ascii"))).decode("utf-8")
 exec(compile(_code, str(Path(__file__).resolve()), "exec"), globals())
