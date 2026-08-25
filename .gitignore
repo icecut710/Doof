@@ -51,3 +51,13 @@ data/reward_ledger.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Transfer / connector artifacts (never ship)
+*.b64
+data/*.b64
+data/*.b64.*
+data/App.tsx.b64*
+data/api*.b64
+data/rem_*.b64
+PUSH_TEST.md
+patches/*.patch
