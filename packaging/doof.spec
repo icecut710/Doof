@@ -2,16 +2,9 @@
 """PyInstaller onedir spec for DOOF v0.3 — friend-ready Windows EXE.
 
 CRITICAL: Do NOT exclude torch.distributed.
-Excluding it and pre-stubbing the module caused:
-  AttributeError: partially initialized module 'torch' has no attribute 'distributed'
+Excluding it and pre-stubbing the module caused circular init.
 
-Output:
-  dist/DOOF/DOOF.exe
-  dist/DOOF/_internal/...
-
-Build (from repo root, on Windows):
-  packaging\\build.bat
-  or:  python packaging/build_exe.py
+Build from repo root: packaging\\build.bat
 """
 
 from pathlib import Path
@@ -44,6 +37,7 @@ def _datas():
         (ROOT / "checkpoints", "checkpoints"),
         (ROOT / "database", "database"),
         (ROOT / "releases", "releases"),
+        (ROOT / "packaging" / "updater", "packaging/updater"),
     ]
     train = ROOT / "data" / "train.txt"
     if train.is_file():
@@ -74,7 +68,6 @@ a = Analysis(
         "doof.paths",
         "doof.gui",
         "doof.gui.app",
-        "doof.gui.main_window",
         "doof.inference",
         "doof.inference.generate",
         "doof.training",
@@ -82,6 +75,9 @@ a = Analysis(
         "doof.model",
         "doof.cloud",
         "doof.cloud.client",
+        "doof.cloud.hosted_brain",
+        "doof.models",
+        "doof.models.manager",
         "doof.intelligence",
         "doof.intelligence.store",
         "doof.intelligence.rag",
@@ -96,11 +92,15 @@ a = Analysis(
         "doof.compute.jobs",
         "doof.compute.scheduler",
         "doof.compute.pool",
+        "doof.compute.pool_patch",
+        "doof.compute.cloud_inference",
         "doof.runtime",
         "doof.errors",
         "doof.personality",
+        "doof.brain",
         "doof.updates",
         "doof.updates.client",
+        "doof.updates.apply_helper",
         "doof.admin",
         "dotenv",
         "PySide6",
@@ -117,6 +117,7 @@ a = Analysis(
         "torch.nn",
         "torch.nn.functional",
         "torch.distributed",
+        "torch.testing",
         "tqdm",
         "http.server",
         "json",
@@ -138,12 +139,9 @@ a = Analysis(
         "notebook",
         "pytest",
         "triton",
-        "torch.testing",
         "torch.utils.tensorboard",
         "sympy",
         "networkx",
-        # Do NOT exclude torch.distributed — required for clean torch import.
-        # nvidia/cudnn may still be large; collect what the installed torch needs.
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -156,11 +154,6 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 _icon = ROOT / "assets" / "doof.ico"
 if not _icon.is_file():
     _icon = ROOT / "assets" / "doof_icon.ico"
-if not _icon.is_file():
-    # Prefer MRNADDAF visual identity when ico missing
-    for cand in (ROOT / "assets" / "mrnaddaf.png", ROOT / "frontend" / "public" / "mrnaddaf.png"):
-        if cand.is_file():
-            break
 
 exe = EXE(
     pyz,
