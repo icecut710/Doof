@@ -1,4 +1,4 @@
-"""DOOF v0.2 — deterministic friend-ready onedir EXE build (Windows).
+"""DOOF v3.0 — deterministic friend-ready onedir EXE build (Windows).
 
 Run from the project root:
 
@@ -8,16 +8,21 @@ Run from the project root:
 
 Pipeline (ALWAYS in this order):
   0. Record git commit + wipe ROOT/build and ROOT/dist (never source trees)
-  1. npm install + production frontend build  →  frontend/dist/index.html
-     (NO build:fast fallback — failed Vite aborts the entire build)
+  1. npm install + production frontend build  ->  frontend/dist/index.html
+     (NO build:fast fallback -- failed Vite aborts the entire build)
   2. Verify frontend assets (index, Naddaf, audio if present in public/)
   3. PyInstaller onedir via packaging/doof.spec (--noconfirm --clean)
   4. Verify frozen package + write BUILD_INFO.txt + .env.example
 
-This is the ONLY supported way to ship a usable EXE.
+CUDA PRESERVATION RULES:
+  - NEVER uninstall or replace an existing CUDA torch installation.
+  - Detect torch.cuda.is_available() before build and carry it through.
+  - If CUDA is present, bundle CUDA DLLs and label the build GPU-enabled.
+  - If CUDA is absent, build CPU-only and label accordingly.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -26,7 +31,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Bundled ambient track (audio.ts prefers ./arabicrap.mp3; Supabase is fallback only)
 AUDIO_NAME = "arabicrap.mp3"
 NADDAF_NAME = "mrnaddaf.png"
 
@@ -55,8 +59,36 @@ def git_short_hash() -> str:
     return "unknown"
 
 
+def detect_cuda() -> dict:
+    """Detect CUDA torch and GPU capabilities. Never modifies the install."""
+    info = {
+        "cuda_available": False,
+        "torch_version": None,
+        "cuda_version": None,
+        "gpu_name": None,
+        "gpu_vram_gb": None,
+        "build_label": "CPU-only",
+    }
+    try:
+        import torch
+        info["torch_version"] = torch.__version__
+        if torch.cuda.is_available():
+            info["cuda_available"] = True
+            info["cuda_version"] = getattr(torch.version, "cuda", None)
+            try:
+                info["gpu_name"] = torch.cuda.get_device_name(0)
+                props = torch.cuda.get_device_properties(0)
+                info["gpu_vram_gb"] = round(props.total_memory / (1024**3), 2)
+            except Exception:
+                pass
+            info["build_label"] = "GPU (CUDA)"
+    except ImportError:
+        pass
+    return info
+
+
 def clean_old_output() -> None:
-    """Remove previous PyInstaller / dist output only — never source trees."""
+    """Remove previous PyInstaller / dist output only -- never source trees."""
     print("\n========== 0/5  CLEAN OLD OUTPUT ==========")
     for name in ("build", "dist"):
         path = ROOT / name
@@ -65,12 +97,10 @@ def clean_old_output() -> None:
             shutil.rmtree(path, ignore_errors=False)
             print(f"[build] Removed {name}/")
         else:
-            print(f"[build] No existing {name}/ — skip")
-    # Stale Vite dist would also ship old UI if we skipped npm run build;
-    # production build rewrites it, but wipe so verification is unambiguous.
+            print(f"[build] No existing {name}/ -- skip")
     fe_dist = ROOT / "frontend" / "dist"
     if fe_dist.exists():
-        print(f"[build] Removing stale frontend/dist → {fe_dist}")
+        print(f"[build] Removing stale frontend/dist")
         shutil.rmtree(fe_dist, ignore_errors=False)
         print("[build] Removed frontend/dist/")
 
@@ -85,7 +115,7 @@ def _ensure_app_tsx() -> None:
     text = app.read_text(encoding="utf-8", errors="replace").strip()
     if text == "PLACEHOLDER" or len(text) < 500:
         if restore.is_file():
-            print("[build] Restoring frontend/src/App.tsx via scripts/restore_music_app.py …")
+            print("[build] Restoring frontend/src/App.tsx via scripts/restore_music_app.py ...")
             r = subprocess.run([sys.executable, str(restore)], cwd=str(ROOT))
             if r.returncode != 0:
                 print("[build] ERROR: could not restore App.tsx")
@@ -104,10 +134,10 @@ def build_frontend() -> None:
     _ensure_app_tsx()
 
     print("\n========== 1/5  FRONTEND PRODUCTION BUILD ==========")
-    print("[build] npm install…")
+    print("[build] npm install...")
     run("npm install", cwd=frontend, shell=True)
 
-    print("[build] npm run build… (strict — no build:fast fallback)")
+    print("[build] npm run build... (strict -- no build:fast fallback)")
     r = subprocess.run("npm run build", cwd=str(frontend), shell=True)
     if r.returncode != 0:
         print("[build] ERROR: production Vite build failed.")
@@ -120,9 +150,8 @@ def build_frontend() -> None:
         print(f"[build] ERROR: expected {index}")
         print("[build] UI will NOT load in the EXE without this file.")
         sys.exit(1)
-    print(f"[build] OK frontend → {index}")
+    print(f"[build] OK frontend -> {index}")
 
-    # Naddaf: Vite copies public/ → dist/; copy if missing
     naddaf = frontend / "dist" / NADDAF_NAME
     if not naddaf.is_file():
         src = frontend / "public" / NADDAF_NAME
@@ -130,7 +159,6 @@ def build_frontend() -> None:
             shutil.copy2(src, naddaf)
             print(f"[build] copied {NADDAF_NAME} into frontend/dist")
         else:
-            # assets/ fallback used by some older trees
             alt = ROOT / "assets" / NADDAF_NAME
             if alt.is_file():
                 shutil.copy2(alt, naddaf)
@@ -138,7 +166,6 @@ def build_frontend() -> None:
             else:
                 print(f"[build] WARNING: {NADDAF_NAME} missing from frontend dist")
 
-    # Audio: audio.ts uses ./arabicrap.mp3 first — must be in dist for offline EXE
     audio_public = frontend / "public" / AUDIO_NAME
     audio_dist = frontend / "dist" / AUDIO_NAME
     if audio_public.is_file():
@@ -146,12 +173,9 @@ def build_frontend() -> None:
             shutil.copy2(audio_public, audio_dist)
             print(f"[build] copied {AUDIO_NAME} into frontend/dist")
         else:
-            print(f"[build] OK bundled audio → {audio_dist.relative_to(ROOT)}")
+            print(f"[build] OK bundled audio -> {audio_dist.relative_to(ROOT)}")
     else:
-        print(
-            f"[build] NOTE: no frontend/public/{AUDIO_NAME} — "
-            "runtime will use Supabase public fallback if audio.ts is wired"
-        )
+        print(f"[build] NOTE: no frontend/public/{AUDIO_NAME} -- skipped")
 
 
 def verify_frontend() -> None:
@@ -176,18 +200,6 @@ def verify_frontend() -> None:
     elif (ROOT / "frontend" / "public" / AUDIO_NAME).is_file():
         print(f"[build] ERROR: {AUDIO_NAME} in public/ but missing from frontend/dist")
         sys.exit(1)
-
-    # Source-side signals (informational — do not fail if UI not wired yet)
-    app = ROOT / "frontend" / "src" / "App.tsx"
-    audio_ts = ROOT / "frontend" / "src" / "audio.ts"
-    if app.is_file():
-        app_txt = app.read_text(encoding="utf-8", errors="replace")
-        if "doofAudio" in app_txt or "from \"./audio\"" in app_txt:
-            print("[build] App.tsx references ambient audio engine")
-        else:
-            print("[build] NOTE: App.tsx does not reference doofAudio (music not wired in UI)")
-    if audio_ts.is_file():
-        print("[build] OK frontend/src/audio.ts present")
 
     print("FRONTEND PRODUCTION BUILD VERIFIED")
 
@@ -217,7 +229,7 @@ def verify_repo_assets() -> None:
     if ckpt.is_file():
         print(f"[build] OK {ckpt.relative_to(ROOT)}")
     else:
-        print("[build] WARNING: checkpoints/doof_v01.pt missing — first run bootstraps weights")
+        print("[build] WARNING: checkpoints/doof_v01.pt missing -- first run bootstraps weights")
 
 
 def build_exe() -> Path:
@@ -236,23 +248,32 @@ def build_exe() -> Path:
             str(spec),
         ]
     )
-    out = ROOT / "dist" / "DOOF" / "DOOF.exe"
+    out = ROOT / "dist" / "Doof v3.0" / "Doof v3.0.exe"
     if not out.is_file():
-        alt = ROOT / "dist" / "DOOF" / "DOOF"
+        alt = ROOT / "dist" / "DOOF" / "DOOF.exe"
         if alt.is_file():
             return alt
+        alt2 = ROOT / "dist" / "DOOF" / "DOOF"
+        if alt2.is_file():
+            return alt2
         print(f"[build] ERROR: expected {out}")
         sys.exit(1)
     return out
 
 
-def verify_package(exe: Path, commit: str) -> None:
+def verify_package(exe: Path, commit: str, cuda_info: dict) -> None:
     print("\n========== 5/5  VERIFY FINAL PACKAGE ==========")
     dest = exe.parent
     if not exe.is_file():
         print(f"[build] ERROR: EXE missing: {exe}")
         sys.exit(1)
     print(f"[build] OK EXE {exe} ({exe.stat().st_size} bytes)")
+
+    # Verify NO real .env file is packaged (secrets leak)
+    for candidate in [dest / ".env", dest / "_internal" / ".env"]:
+        if candidate.is_file():
+            print(f"[build] WARNING: real .env found at {candidate} -- removing for security")
+            candidate.unlink()
 
     # Frozen UI lives under _internal/frontend/dist (onedir COLLECT datas)
     candidates = [
@@ -261,7 +282,7 @@ def verify_package(exe: Path, commit: str) -> None:
     ]
     index = next((p for p in candidates if p.is_file()), None)
     if index is None:
-        print("[build] ERROR: packaged frontend/dist/index.html not found under dist/DOOF/")
+        print("[build] ERROR: packaged frontend/dist/index.html not found under dist/Doof v3.0/")
         for p in candidates:
             print(f"[build]   looked: {p}")
         sys.exit(1)
@@ -282,54 +303,61 @@ def verify_package(exe: Path, commit: str) -> None:
             print(f"[build] ERROR: {AUDIO_NAME} was in public/ but not in packaged frontend/dist")
             sys.exit(1)
 
-    # Icon / checkpoint often land under _internal
+    # Verify CUDA DLLs if CUDA build
     internal = dest / "_internal"
-    icon_hits = list(internal.rglob("doof*.ico")) if internal.is_dir() else []
-    if icon_hits:
-        print(f"[build] OK packaged icon ({icon_hits[0].relative_to(ROOT)})")
-    else:
-        print("[build] WARNING: no doof*.ico found under _internal")
+    if cuda_info["cuda_available"]:
+        torch_lib = internal / "torch" / "lib"
+        if torch_lib.is_dir():
+            cuda_dlls = list(torch_lib.glob("*cuda*"))
+            cublas_dlls = list(torch_lib.glob("*cublas*"))
+            cudnn_dlls = list(torch_lib.glob("*cudnn*"))
+            nvrtc_dlls = list(torch_lib.glob("*nvrtc*"))
+            total = len(cuda_dlls) + len(cublas_dlls) + len(cudnn_dlls) + len(nvrtc_dlls)
+            if total > 0:
+                print(f"[build] OK CUDA DLLs in torch/lib/: {total} files (cuda/cublas/cudnn/nvrtc)")
+            else:
+                print("[build] WARNING: CUDA build but no CUDA DLLs found in torch/lib/")
+        else:
+            print("[build] WARNING: torch/lib/ not found -- cannot verify CUDA DLLs")
 
+    # Checkpoint
     ckpt_hits = list(internal.rglob("doof_v01.pt")) if internal.is_dir() else []
     if ckpt_hits:
         print(f"[build] OK packaged checkpoint ({ckpt_hits[0].relative_to(ROOT)})")
     else:
         print("[build] WARNING: doof_v01.pt not found in package (optional bootstrap)")
 
-    # Ship helpers
+    # Ship .env.example only -- never .env
     env_src = ROOT / ".env.example"
     if env_src.is_file():
         shutil.copy2(env_src, dest / ".env.example")
-        print(f"[build] OK .env.example → {dest / '.env.example'}")
+        print(f"[build] OK .env.example -> {dest / '.env.example'}")
     else:
         print("[build] WARNING: .env.example missing from repo root")
 
+    # Build label
+    build_label = cuda_info["build_label"]
+    gpu_detail = ""
+    if cuda_info["cuda_available"]:
+        gpu_detail = f" | GPU: {cuda_info['gpu_name'] or '?'} ({cuda_info['gpu_vram_gb'] or '?'} GB)"
+
     readme = dest / "README_FIRST.txt"
     readme.write_text(
-        "DOOF v0.2 — first-run checklist\n"
-        "================================\n\n"
-        "1. Copy .env.example to .env (same folder as DOOF.exe) OR\n"
-        "   put .env in %LOCALAPPDATA%\\DOOF\\\n\n"
-        "2. Fill in:\n"
-        "   SUPABASE_URL=https://YOUR_PROJECT.supabase.co\n"
-        "   SUPABASE_ANON_KEY=your_anon_key\n\n"
-        "3. Supabase Dashboard → Authentication → URL Configuration:\n"
-        "   Site URL:        http://127.0.0.1:8766\n"
-        "   Redirect URLs:   http://127.0.0.1:8766/**\n"
-        "                    http://127.0.0.1:8766/\n"
-        "                    http://localhost:3000/**\n"
-        "                    http://127.0.0.1:3000/**\n\n"
-        "4. Enable Google provider under Authentication → Providers\n"
-        "   (Client ID / Secret from Google Cloud Console)\n\n"
-        "5. Double-click DOOF.exe\n\n"
-        "SHARING WITH FRIENDS\n"
-        "Zip the ENTIRE dist\\DOOF folder (DOOF.exe AND the _internal folder).\n"
-        "Sending only DOOF.exe causes 'python DLL not found'.\n"
-        "Friend machines do not need Python or Node installed.\n\n"
-        "Google button appears only when SUPABASE_URL + SUPABASE_ANON_KEY are set.\n"
-        "Email confirmation links must be opened on this same PC (DOOF is listening).\n"
-        "Standalone EXEs do not see each other unless they join the same API host\n"
-        "or share the same Supabase project.\n",
+        f"DOOF v3.0 -- first-run checklist\n"
+        f"================================\n\n"
+        f"Build type: {build_label}{gpu_detail}\n\n"
+        f"1. Copy .env.example to .env (same folder as Doof v3.0.exe) OR\n"
+        f"   put .env in %LOCALAPPDATA%\\DOOF\\\n\n"
+        f"2. Fill in:\n"
+        f"   SUPABASE_URL=https://YOUR_PROJECT.supabase.co\n"
+        f"   SUPABASE_ANON_KEY=your_anon_key\n\n"
+        f"3. Double-click Doof v3.0.exe\n\n"
+        f"SHARING WITH FRIENDS\n"
+        f"Zip the ENTIRE dist\\Doof v3.0 folder (Doof v3.0.exe AND the _internal folder).\n"
+        f"Sending only Doof v3.0.exe causes 'python DLL not found'.\n"
+        f"Friend machines do not need Python or Node installed.\n\n"
+        f"Google button appears only when SUPABASE_URL + SUPABASE_ANON_KEY are set.\n"
+        f"Email confirmation links must be opened on this same PC (DOOF is listening).\n",
         encoding="utf-8",
     )
     print(f"[build] wrote {readme}")
@@ -337,10 +365,18 @@ def verify_package(exe: Path, commit: str) -> None:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     info = dest / "BUILD_INFO.txt"
     info.write_text(
-        f"DOOF v0.2\n"
-        f"Git commit: {commit}\n"
-        f"Build time: {stamp}\n"
-        f"EXE: {exe.name}\n",
+        f"DOOF v3.0\n"
+        f"Build type:    {build_label}\n"
+        f"Git commit:    {commit}\n"
+        f"Build time:    {stamp}\n"
+        f"EXE:           {exe.name}\n"
+        f"Python:        {sys.version}\n"
+        f"Platform:      {sys.platform}\n"
+        f"Architecture:  {' '.join(__import__('platform').architecture())}\n"
+        f"Torch version: {cuda_info['torch_version'] or 'not installed'}\n"
+        f"CUDA version:  {cuda_info['cuda_version'] or 'N/A'}\n"
+        f"GPU:           {cuda_info['gpu_name'] or 'N/A'}\n"
+        f"GPU VRAM:      {cuda_info['gpu_vram_gb'] or 'N/A'} GB\n",
         encoding="utf-8",
     )
     print(f"[build] wrote {info}")
@@ -348,9 +384,15 @@ def verify_package(exe: Path, commit: str) -> None:
 
 def main() -> int:
     commit = git_short_hash()
-    print("DOOF v0.2 deterministic friend-ready build")
+    cuda_info = detect_cuda()
+    print("DOOF v3.0 deterministic friend-ready build")
     print(f"ROOT = {ROOT}")
     print(f"Git commit: {commit}")
+    print(f"Build type: {cuda_info['build_label']}")
+    if cuda_info["cuda_available"]:
+        print(f"CUDA: {cuda_info['cuda_version']} | GPU: {cuda_info['gpu_name']} ({cuda_info['gpu_vram_gb']} GB)")
+    else:
+        print("CUDA: not available -- building CPU-only package")
     if sys.platform != "win32":
         print("[build] WARNING: QtWebEngine onedir EXE is intended for Windows.")
         print("[build] Continuing anyway (useful for validating the frontend step).")
@@ -360,16 +402,17 @@ def main() -> int:
     verify_frontend()
     verify_repo_assets()
     exe = build_exe()
-    verify_package(exe, commit)
+    verify_package(exe, commit, cuda_info)
 
     print("")
     print("========================================")
     print(" DOOF BUILD COMPLETE")
-    print(f" Commit: {commit}")
-    print(f" EXE:    {exe}")
+    print(f" Commit:  {commit}")
+    print(f" Type:    {cuda_info['build_label']}")
+    print(f" EXE:     {exe}")
     print("========================================")
-    print("  Zip the entire dist/DOOF/ folder to share with friends.")
-    print("  Put .env next to DOOF.exe before first launch.")
+    print("  Zip the entire dist/Doof v3.0/ folder to share with friends.")
+    print("  Put .env next to Doof v3.0.exe before first launch.")
     print(f"  Confirm BUILD_INFO.txt lists commit {commit}.")
     return 0
 

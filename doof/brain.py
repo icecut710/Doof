@@ -10,21 +10,25 @@ When the primary model is weak or unavailable we still attempt:
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+log = logging.getLogger("doof.brain")
 
 
 def build_system_preamble(memories: list[dict[str, Any]] | None = None) -> str:
     lines = [
         "You are DOOF, a private collaborative AI.",
         "Be concise, useful, and slightly dry. Occasional shawarma or Lebanon references are fine if natural — never force jokes.",
-        "Use shared memory when it is relevant. If you do not know something, say so honestly and still try to help.",
+        "Use shared memory ONLY when it is clearly relevant to the user's question. Do not mention unrelated memories.",
         "You can answer general questions without requiring the user to teach you first.",
+        "If asked about identity, answer about DOOF. If asked about preferences, check if any relevant preference memories exist. Do not volunteer irrelevant personal details.",
     ]
     facts = [str(m.get("content") or "").strip() for m in (memories or []) if m.get("content")]
     facts = [f for f in facts if f]
     if facts:
-        lines.append("Relevant shared memory:")
+        lines.append("Relevant shared memory (use only if directly related to the question):")
         for f in facts[:8]:
             lines.append(f"- {f}")
     return "\n".join(lines)
@@ -36,28 +40,65 @@ def build_prompt(user_text: str, memories: list[dict[str, Any]] | None = None) -
 
 
 def _looks_garbled(text: str) -> bool:
+    """Detect obviously broken model output. Keep minimal to avoid false positives."""
     t = (text or "").strip()
-    if len(t) < 8:
+    if not t:
+        return True
+    if len(t) < 4:
         return True
     letters = sum(ch.isalpha() for ch in t)
-    if letters < max(6, int(len(t) * 0.3)):
+    if len(t) > 6 and letters < max(3, int(len(t) * 0.2)):
         return True
     low = t.lower()
-    if low.count("kaeden likes") >= 2 and len(t) < 240:
+    # Catch training data parroting (any variant of known training phrases)
+    _TRAINING_PATTERNS = (
+        "kaeden", "futuristic dark interface", "futuristic dark",
+        "i am here", "warming up", "brain path",
+    )
+    if any(p in low for p in _TRAINING_PATTERNS):
         return True
     if t.count("\n") > 12 and len(set(t.split())) < 12:
         return True
+    # Repetition check
+    words = [w for w in t.split() if any(c.isalnum() for c in w)]
+    if len(words) > 5:
+        from collections import Counter
+        counts = Counter(w.lower() for w in words)
+        most_common_count = counts.most_common(1)[0][1]
+        if most_common_count > len(words) * 0.4:
+            return True
+    # Nonsense word density: if most words don't look like real English
+    if len(words) >= 4:
+        _REAL_ENGLISH = {
+            "the","a","an","i","is","are","was","you","my","me","to",
+            "of","in","for","with","on","at","by","it","this","that",
+            "have","has","do","does","can","will","not","but","or",
+            "and","if","so","no","yes","am","be","we","he","she",
+            "they","what","how","when","where","who","why","all",
+            "your","its","our","about","from","into","just","like",
+            "also","still","more","most","than","then","very",
+            "hello","hi","hey","thanks","please","sure","well",
+            "here","there","now","then","after","before","over",
+            "under","between","through","before","during","since",
+        }
+        real_words = sum(1 for w in words if w.lower().rstrip(".,!?;:'\"-") in _REAL_ENGLISH)
+        if real_words < max(2, len(words) * 0.15):
+            return True
     return False
 
 
-def lightweight_answer(prompt: str, memories: list[dict[str, Any]] | None = None) -> str:
-    """Legitimate non-torch path. Not a FAQ table — composes from context."""
+def memory_answer(prompt: str, memories: list[dict[str, Any]] | None = None) -> str:
+    """Answer from stored memory. Returns "" if no memory matches.
+
+    This is NOT neural generation — it retrieves real user-provided data.
+    """
     q = (prompt or "").strip()
     ql = q.lower()
     memories = memories or []
     facts = [str(m.get("content") or "").strip() for m in memories if m.get("content")]
     facts = [f for f in facts if f]
 
+    # Direct memory query — user is asking what they told DOOF
     memory_intent = any(
         w in ql
         for w in (
@@ -77,77 +118,83 @@ def lightweight_answer(prompt: str, memories: list[dict[str, Any]] | None = None
             lines.append(f"- {f}")
         return "\n".join(lines)
 
-    if facts and any(f.lower() in ql or ql in f.lower() for f in facts):
-        matched = [f for f in facts if any(tok in f.lower() for tok in ql.split() if len(tok) > 3)]
-        if matched:
-            return matched[0] if len(matched) == 1 else "Here is what I have on that:\n- " + "\n- ".join(matched[:4])
+    # Topic-specific memory match — word overlap with memory content
+    if facts:
+        import string as _string
+        # Strip punctuation and lowercase query words
+        query_words = set(w.strip(_string.punctuation) for w in ql.split())
 
-    if any(w in ql for w in ("who are you", "tell me about yourself", "what are you")):
-        return (
-            "I am DOOF — a private, local-first AI that can use your machine, "
-            "optional shared compute, and shared memory. I get better when you "
-            "correct me and approve examples, but I can talk without training first."
-        )
+        def _stem(word: str) -> str:
+            """Minimal suffix strip for matching: likes→like, running→run"""
+            if word.endswith("ing") and len(word) > 5:
+                return word[:-3]
+            if word.endswith("ies") and len(word) > 4:
+                return word[:-3] + "y"
+            # Check single 's' before 'es' to handle likes→like correctly
+            if word.endswith("s") and not word.endswith("ss") and len(word) > 4:
+                return word[:-1]
+            if word.endswith("es") and len(word) > 5:
+                return word[:-2]
+            return word
 
-    if "shawarma" in ql:
-        return (
-            "Shawarma is treated seriously around here. It is part of DOOF's personality, "
-            "not the whole product. If you have a preference, put it in Memory and I will keep it."
-        )
+        query_stems = set(_stem(w) for w in query_words if len(w) > 2)
 
-    if "lebanon" in ql:
-        return (
-            "Lebanon shows up in DOOF's voice the same way — an inside reference, "
-            "not a substitute for real answers. Ask me something concrete and I will try."
-        )
+        for f in facts:
+            fl = f.lower()
+            # Direct substring match
+            if fl in ql or ql in fl:
+                return f
+            # Word overlap using stems
+            f_words = set(fl.split())
+            f_stems = set(_stem(w.strip(_string.punctuation)) for w in f_words if len(w.strip(_string.punctuation)) > 2)
+            overlap = query_stems & f_stems
+            if overlap:
+                return f
 
-    if "compute pool" in ql or ("network" in ql and "node" in ql):
-        return (
-            "The compute pool lets willing machines take typed jobs (chat, embeddings, training) "
-            "through a cloud queue. Contribution is off by default. LAN is optional; "
-            "the normal path does not need port forwarding."
-        )
+    return ""
 
-    if "portal" in ql:
-        return (
-            "I do not have a built-in dossier on Portal. If you add notes in Memory, "
-            "I will use them. Otherwise, tell me what aspect you care about."
-        )
 
-    m = re.search(r"(\d+)\s*(?:[×x*]|times)\s*(\d+)", ql)
+def math_answer(prompt: str) -> str:
+    """Compute arithmetic. Returns "" if not a math expression."""
+    q = (prompt or "").strip().lower()
+    m = re.search(r"(\d+)\s*(?:[×x*]|times)\s*(\d+)", q)
     if m:
         a, b = int(m.group(1)), int(m.group(2))
         return str(a * b)
-    m = re.search(r"(\d+)\s*([+\-])\s*(\d+)", ql)
+    m = re.search(r"(\d+)\s*([+\-])\s*(\d+)", q)
     if m:
         a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
         return str(a + b if op == "+" else a - b)
-
-    if facts:
-        return (
-            "I am running on a backup path right now, so my answers are limited. "
-            "Here is related memory I have:\n- "
-            + "\n- ".join(facts[:4])
-            + "\n\nIf that does not cover it, try again when the main brain is up."
-        )
-
-    ql = (prompt or "").strip().lower()
-    if any(w in ql for w in ("hello", "hi ", "hey", "good morning", "good evening")):
-        return "Hello. I am DOOF. Ask me anything — I will use whatever brain path is available."
-    if "?" in (prompt or ""):
-        return (
-            "I am online, but the full generative model is not loaded on this machine right now. "
-            "I can still use shared memory when it matches your question, take feedback, and "
-            "join the compute pool. Try again after the brain finishes loading, or enable a "
-            "friend node / DOOF hosted brain when configured."
-        )
-    return (
-        "I am here. The primary model is still warming up or unavailable on this path. "
-        "Tell me what you need — I will use memory, remote nodes, or the hosted DOOF brain when available."
-    )
+    return ""
 
 
-def postprocess_model_text(text: str, prompt: str, memories: list[dict[str, Any]] | None = None) -> str:
-    if not _looks_garbled(text):
-        return text.strip()
-    return lightweight_answer(prompt, memories)
+def postprocess_model_text(text: str, prompt: str, memories: list[dict[str, Any]] | None = None) -> tuple[str, str]:
+    """Validate model output. Returns (text, source).
+
+    Returns:
+        (cleaned_text, source) where source is:
+          "model" — text is genuine model output
+          "memory" — model output was unusable, used memory instead
+          "empty" — model produced nothing usable
+
+    Never returns canned identity/personality text.
+    """
+    cleaned = (text or "").strip()
+    if not cleaned:
+        log.debug("model produced empty output for prompt: %s", prompt[:80])
+        # Try memory-based answer for the prompt
+        mem = memory_answer(prompt, memories)
+        if mem:
+            return mem, "memory"
+        return "", "empty"
+
+    if not _looks_garbled(cleaned):
+        return cleaned, "model"
+
+    # Model produced garbled output — try memory as honest alternative
+    log.debug("model produced garbled output (%d chars), prompt: %s", len(cleaned), prompt[:80])
+    mem = memory_answer(prompt, memories)
+    if mem:
+        return mem, "memory"
+
+    return "", "empty"

@@ -195,6 +195,105 @@ def try_handle(
         _json(handler, 200, save_update_settings(body))
         return True
 
+    # -------- Model Sync --------
+    if path == "/api/models/sync/check" and method == "GET":
+        from doof.models.manager import list_registry, resolve_active_model, model_compatible
+
+        try:
+            models = list_registry()
+            active = resolve_active_model()
+            hw_info = {}
+            try:
+                from doof.runtime import probe_hardware
+                hw_info = probe_hardware()
+            except Exception:
+                pass
+            compatible, reason = model_compatible(active, hw_info) if active else (False, "no model")
+            _json(handler, 200, {
+                "active_model": active.as_dict() if active else None,
+                "registry_count": len(models),
+                "compatible": compatible,
+                "compatibility_reason": reason,
+                "cached": [{"name": m.name, "size": m.size} for m in __import__("doof.models.manager", fromlist=["list_cached"]).list_cached()],
+            })
+        except Exception as e:
+            _json(handler, 500, {"error": str(e)})
+        return True
+
+    if path == "/api/models/sync/ensure" and method == "POST":
+        from doof.models.manager import ensure_model
+
+        body = read_json()
+        model_id = body.get("model_id", "doof-base")
+        version = body.get("version")
+        try:
+            model = ensure_model(model_id, version)
+            _json(handler, 200, {"ok": True, "model": model.as_dict()})
+        except Exception as e:
+            _json(handler, 400, {"error": str(e)})
+        return True
+
+    # Model upload with optional cloud sync
+    if path == "/api/models/upload" and method == "POST":
+        body = read_json()
+        ckpt_path = (body.get("path") or body.get("checkpoint_path") or "").strip()
+        model_id = (body.get("model_id") or "doof-base").strip()
+        version = (body.get("version") or "").strip()
+        if not ckpt_path or not version:
+            _json(handler, 400, {"error": "path and version required"})
+            return True
+        try:
+            from doof.models.manager import upload_checkpoint
+            from pathlib import Path as P
+            model = upload_checkpoint(
+                P(ckpt_path), model_id, version,
+                label=body.get("label", ""),
+                channel=body.get("channel", "stable"),
+                notes=body.get("notes", ""),
+                upload_to_cloud=bool(body.get("upload_to_cloud")),
+            )
+            _json(handler, 201, {"ok": True, "model": model.as_dict()})
+        except Exception as e:
+            _json(handler, 400, {"error": str(e)})
+        return True
+
+    # Register a model entry (metadata only, no file upload)
+    if path == "/api/models/register" and method == "POST":
+        body = read_json()
+        model_id = (body.get("model_id") or "").strip()
+        version = (body.get("version") or "").strip()
+        if not model_id or not version:
+            _json(handler, 400, {"error": "model_id and version required"})
+            return True
+        try:
+            from doof.models.manager import ModelInfo
+            from database import get_db
+            db = get_db()
+            record = {
+                "model_id": model_id,
+                "version": version,
+                "label": body.get("label", f"{model_id} {version}"),
+                "format": body.get("format", "doof-pt"),
+                "size_bytes": int(body.get("size_bytes") or 0),
+                "sha256": body.get("sha256", ""),
+                "download_url": body.get("download_url", ""),
+                "channel": body.get("channel", "stable"),
+                "status": body.get("status", "candidate"),
+                "cpu_supported": bool(body.get("cpu_supported", True)),
+                "gpu_supported": bool(body.get("gpu_supported", True)),
+                "min_ram_gb": float(body.get("min_ram_gb") or 4),
+                "recommended_ram_gb": float(body.get("recommended_ram_gb") or 8),
+                "min_vram_gb": float(body.get("min_vram_gb") or 0),
+                "recommended_vram_gb": float(body.get("recommended_vram_gb") or 0),
+                "notes": body.get("notes", ""),
+            }
+            if hasattr(db, "insert_model"):
+                db.insert_model(record)
+            _json(handler, 201, {"ok": True, "model": record})
+        except Exception as e:
+            _json(handler, 400, {"error": str(e)})
+        return True
+
     # -------- Admin --------
     if path == "/api/admin/overview" and method == "GET":
         from doof.admin import health_board, is_admin, pool_paused, role_of
@@ -233,6 +332,7 @@ def try_handle(
             {
                 "allowed": True,
                 "role": role_of(profile),
+                "currentUserId": (profile or {}).get("id"),
                 "health": health_board(),
                 "pool": {
                     "paused": pool_paused(),
@@ -294,6 +394,68 @@ def try_handle(
         actor = str((profile or {}).get("id") or "")
         audit("node_disable", actor=actor, target=nid)
         _json(handler, 200, {"ok": True})
+        return True
+
+    # -------- Admin: User Management --------
+    if path == "/api/admin/users" and method == "GET":
+        from doof.admin import is_admin, require_admin
+
+        try:
+            require_admin(profile)
+        except PermissionError:
+            _json(handler, 403, {"error": "forbidden"})
+            return True
+        try:
+            from doof.api_full import _load_profiles
+
+            profiles = _load_profiles()
+            users = [
+                {
+                    "id": p.get("id", ""),
+                    "email": p.get("email", ""),
+                    "name": p.get("name", ""),
+                    "role": p.get("role", "user"),
+                    "provider": p.get("provider", "local"),
+                    "created_at": p.get("created_at", ""),
+                }
+                for p in profiles
+            ]
+            _json(handler, 200, {"users": users})
+        except Exception as e:
+            _json(handler, 500, {"error": str(e)})
+        return True
+
+    if path == "/api/admin/users/role" and method == "POST":
+        from doof.admin import is_owner, require_owner
+
+        try:
+            require_owner(profile)
+        except PermissionError:
+            _json(handler, 403, {"error": "forbidden"})
+            return True
+        body = read_json()
+        user_id = str(body.get("user_id") or "")
+        new_role = str(body.get("role") or "").lower()
+        if not user_id or new_role not in ("user", "trusted", "admin", "owner"):
+            _json(handler, 400, {"error": "user_id and valid role required"})
+            return True
+        try:
+            from doof.api_full import _load_profiles, _save_profiles
+
+            profiles = _load_profiles()
+            target = next((p for p in profiles if p.get("id") == user_id), None)
+            if not target:
+                _json(handler, 404, {"error": "user not found"})
+                return True
+            # Prevent self-demotion if owner
+            if user_id == (profile or {}).get("id") and new_role != "owner":
+                _json(handler, 400, {"error": "cannot demote yourself"})
+                return True
+            target["role"] = new_role
+            _save_profiles(profiles)
+            _json(handler, 200, {"ok": True, "user": {"id": target["id"], "email": target.get("email"), "role": new_role}})
+        except Exception as e:
+            _json(handler, 500, {"error": str(e)})
         return True
 
     if path == "/api/version" and method == "GET":

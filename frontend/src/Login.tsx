@@ -15,7 +15,7 @@ function mapAuthError(err: unknown): string {
   const code = (e.code || "").toLowerCase();
   const msg = (e.message || "Request failed").trim();
   if (code === "rate_limited" || /rate limit|too many/i.test(msg)) {
-    return "Too many emails sent. Wait a minute, or use Continue with Google instead.";
+    return "Too many emails sent. Wait a minute, then try again.";
   }
   if (code === "email_unverified" || /verify your email/i.test(msg)) {
     return "Verify your email before entering DOOF. Check your inbox (and spam).";
@@ -168,10 +168,10 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
               type="button"
               disabled={googleBusy}
               onClick={google}
-              className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white py-2 text-[13px] font-medium text-zinc-800 transition hover:bg-zinc-100 disabled:opacity-50"
+              className="mt-3 flex w-full items-center justify-center gap-1.5 text-[12px] text-zinc-600 transition hover:text-zinc-400 disabled:opacity-50"
             >
               <GoogleIcon />
-              {googleBusy ? "Redirecting…" : "Continue with Google instead"}
+              {googleBusy ? "Redirecting…" : "or continue with Google"}
             </button>
           )}
           <button
@@ -262,7 +262,7 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
             {showServer && (
               <input
                 className={input}
-                placeholder="Brain server URL (http://host:8765)"
+                placeholder="DOOF server address (http://host:8765)"
                 value={server}
                 onChange={(e) => setServerUrl(e.target.value)}
               />
@@ -296,36 +296,20 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
           </form>
 
           {googleReady && (
-            <>
-              <div className="my-3 flex items-center gap-2">
-                <div className="h-px flex-1 bg-white/[0.06]" />
-                <span className="text-[13px] uppercase tracking-widest text-zinc-600">or</span>
-                <div className="h-px flex-1 bg-white/[0.06]" />
-              </div>
-              <button
-                type="button"
-                onClick={google}
-                disabled={googleBusy || busy}
-                className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white py-2.5 text-[13px] font-medium text-zinc-800 transition hover:bg-zinc-100 disabled:opacity-50"
-              >
-                <GoogleIcon />
-                {googleBusy ? "Redirecting to Google…" : "Continue with Google"}
-              </button>
-            </>
+            <button
+              type="button"
+              disabled={googleBusy || busy}
+              onClick={google}
+              className="mt-3 flex w-full items-center justify-center gap-1.5 text-[12px] text-zinc-600 transition hover:text-zinc-400 disabled:opacity-50"
+            >
+              <GoogleIcon />
+              {googleBusy ? "Redirecting…" : "or sign in with Google"}
+            </button>
           )}
-          {googleState === "temporarily_unavailable" && (
-            <p className="mt-3 text-center text-[12px] leading-relaxed text-zinc-500">
-              Google took a smoke break. It is configured, but not answering right now. Use email, or try Google again in a minute.
-            </p>
-          )}
-          {googleState === "not_configured" && cfg?.provider === "supabase" && (
-            <p className="mt-3 text-center text-[12px] leading-relaxed text-zinc-600">
-              Google sign-in is not configured on this brain. Email still works.
-            </p>
-          )}
+
           {cfg?.provider === "local" && (
             <p className="mt-3 text-center text-[12px] leading-relaxed text-zinc-600">
-              Local kitchen — accounts stay on this machine until Supabase is configured.
+              Accounts stay on this machine until Cloud Sync is configured.
             </p>
           )}
 
@@ -345,13 +329,13 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
               onClick={() => setShowServer(!showServer)}
               className="text-[12px] text-zinc-500 transition hover:text-violet-300"
             >
-              Join existing brain
+              Connect to DOOF
             </button>
           </div>
         </div>
 
         <p className="mt-3 text-center text-[12px] tracking-wide text-zinc-700">
-          v0.2α · local-first · shared brain
+          v3.0 · local-first · shared brain
         </p>
       </div>
     </div>
@@ -360,7 +344,7 @@ export default function Login({ onLogin }: { onLogin: (p: Profile) => void }) {
 
 function GoogleIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 48 48" aria-hidden>
+    <svg width="12" height="12" viewBox="0 0 48 48" aria-hidden>
       <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
       <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
       <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />

@@ -16,7 +16,7 @@ export default function RewardsTab() {
   const load = useCallback(async () => {
     setErr("");
     try {
-      const res = await fetch(`${base()}/api/rewards`, { headers: token() ? { Authorization: `Bearer ${token()}` } : {} });
+      const res = await fetch(`${base()}/api/compute/rewards`, { headers: token() ? { Authorization: `Bearer ${token()}` } : {} });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setData(await res.json());
     } catch (e) {

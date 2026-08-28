@@ -12,13 +12,13 @@ class DOOFInference:
             raise RuntimeError(torch_error() or "torch unavailable")
 
         from doof.model import DOOFTransformer
-        from doof.tokenizer import DOOFTokenizer
+        from doof.tokenizer import DOOFTokenizer, LegacyTokenizer
 
         self._torch = torch
         device_str, device_label = resolve_device(torch)
         self.device = torch.device(device_str)
         self.device_label = device_label
-        self.tokenizer = DOOFTokenizer()
+
         checkpoint_file = Path(checkpoint_path)
         if not checkpoint_file.exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_file}")
@@ -27,11 +27,39 @@ class DOOFInference:
         self.step = checkpoint.get("step", 0)
         self.loss = checkpoint.get("loss")
         model_config = checkpoint.get("model_config", {})
+        ckpt_vocab_size = model_config.get("vocab_size", 1024)
+
+        # Try to load tokenizer that was saved with this checkpoint
+        ckpt_dir = checkpoint_file.parent
+        saved_tok = DOOFTokenizer.load_from_checkpoint(ckpt_dir)
+
+        if saved_tok is not None:
+            # Verify the saved tokenizer matches the checkpoint's vocab_size
+            if saved_tok.vocab_size != ckpt_vocab_size:
+                raise ValueError(
+                    f"Tokenizer vocab_size mismatch: checkpoint has vocab_size={ckpt_vocab_size}, "
+                    f"but saved tokenizer has vocab_size={saved_tok.vocab_size}. "
+                    f"This checkpoint was trained with a different tokenizer. "
+                    f"Retrain with the current tokenizer or provide the matching tokenizer.json."
+                )
+            self.tokenizer = saved_tok
+        elif ckpt_vocab_size == LegacyTokenizer.VOCAB_SIZE:
+            # Legacy checkpoint (vocab_size=259) → use the legacy byte tokenizer
+            self.tokenizer = LegacyTokenizer()
+        else:
+            # New checkpoint without tokenizer.json — cannot proceed safely
+            raise ValueError(
+                f"Checkpoint specifies vocab_size={ckpt_vocab_size} but no tokenizer.json "
+                f"was found in {ckpt_dir}. A tokenizer.json file must accompany the checkpoint. "
+                f"Retrain to generate one, or provide it manually."
+            )
 
         self.model = DOOFTransformer(
-            vocab_size=model_config.get("vocab_size", self.tokenizer.vocab_size),
+            vocab_size=ckpt_vocab_size,
             max_seq_len=model_config.get("max_seq_len", 128),
             d_model=model_config.get("d_model", 256),
+            n_heads=model_config.get("n_heads", 8),
+            n_layers=model_config.get("n_layers", 6),
         ).to(self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()

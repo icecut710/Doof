@@ -1,8 +1,23 @@
-/** DOOF voice. Funny primary + honest technical line. */
+/**
+ * DOOF voice. Funny primary + honest technical line.
+ *
+ * Now backed by the centralized personality registry.
+ * Future releases add entries to personality-registry.ts — not here.
+ */
+
+import {
+  STATUS_JOKES,
+  SIDEBAR_JOKES,
+  TOAST_JOKES,
+  IDLE_JOKES,
+  pickRandom,
+  type JokeEntry,
+} from "./personality-registry";
 
 export type Voice = { label: string; detail: string };
 
-const LINES: Record<string, Voice[]> = {
+/** Legacy voice lookup — maps old kind strings to registry entries. */
+const LEGACY_LINES: Record<string, Voice[]> = {
   healthy: [
     { label: "Shawarmas: Fresh", detail: "All core services are responding normally." },
     { label: "Lebanon is secure", detail: "Runtime, database, and network are healthy." },
@@ -32,7 +47,70 @@ const LINES: Record<string, Voice[]> = {
   ],
 };
 
+/** Get a random joke from a category, falling back to legacy */
+function pickFromCategory(category: JokeEntry["category"], fallback: string): Voice {
+  const sourceMap: Record<string, JokeEntry[]> = {
+    status: STATUS_JOKES,
+    sidebar: SIDEBAR_JOKES,
+    toast: TOAST_JOKES,
+    idle: IDLE_JOKES,
+  };
+  const source = sourceMap[category];
+  if (source) {
+    const pick = pickRandom(source, 1)[0];
+    if (pick) return { label: pick.text, detail: "" };
+  }
+  // Fallback to legacy
+  const legacy = LEGACY_LINES[fallback] || LEGACY_LINES.healthy;
+  return legacy[0];
+}
+
 export function voice(kind: string): Voice {
-  const opts = LINES[kind] || LINES.healthy;
+  // Map legacy kinds to categories
+  const categoryMap: Record<string, JokeEntry["category"]> = {
+    healthy: "status",
+    degraded: "status",
+    offline: "status",
+    processing: "training",
+    ai: "status",
+    ai_fallback: "status",
+    music: "idle",
+    contribute_on: "sidebar",
+    contribute_off: "sidebar",
+    network_empty: "sidebar",
+  };
+
+  const category = categoryMap[kind];
+  if (category) {
+    return pickFromCategory(category, kind);
+  }
+
+  // Unknown kind — use legacy fallback
+  const opts = LEGACY_LINES[kind] || LEGACY_LINES.healthy;
   return opts[0];
+}
+
+/** Get a random sidebar footer line */
+export function sidebarFooter(online: boolean): string {
+  if (!online) return "Lost in the desert";
+  const pick = pickRandom(SIDEBAR_JOKES, 1)[0];
+  return pick?.text ?? "Shawarmas: Fresh";
+}
+
+/** Get a random sidebar detail line */
+export function sidebarDetail(online: boolean): string {
+  if (!online) return "The brain is unreachable";
+  return "All core services responding";
+}
+
+/** Get a random toast joke for training completion */
+export function trainingToast(): string {
+  const pick = pickRandom(TOAST_JOKES, 1)[0];
+  return pick?.text ?? "Training complete.";
+}
+
+/** Get a random idle joke */
+export function idleJoke(): string {
+  const pick = pickRandom(IDLE_JOKES, 1)[0];
+  return pick?.text ?? "";
 }

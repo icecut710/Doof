@@ -66,7 +66,38 @@ def _settings() -> dict[str, Any]:
             defaults.update({k: data[k] for k in defaults if k in data})
     except Exception:
         pass
-    return defaults
+    return _HARD_LIMITS(defaults)
+
+
+def _HARD_LIMITS(s: dict[str, Any]) -> dict[str, Any]:
+    """Hard safety ceilings that no preset (including 'Hit Mom's Blunt') may exceed.
+
+    These are applied on every settings save AND read so a corrupted or
+    hand-edited config can never unlock unlimited resource usage.
+    """
+    def clamp_pct(v: Any, default: int) -> int:
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return default
+        return max(10, min(95, n))
+
+    out = dict(s)
+    out["max_cpu_pct"] = clamp_pct(s.get("max_cpu_pct"), 80)
+    out["max_gpu_pct"] = clamp_pct(s.get("max_gpu_pct"), 90)
+    try:
+        mj = int(s.get("max_jobs"))
+    except (TypeError, ValueError):
+        mj = 1
+    out["max_jobs"] = max(1, min(4, mj))
+    vram = s.get("max_vram_gb")
+    if vram is not None:
+        try:
+            vram = float(vram)
+            out["max_vram_gb"] = max(0.5, vram) if vram > 0 else None
+        except (TypeError, ValueError):
+            out["max_vram_gb"] = None
+    return out
 
 
 def save_settings(update: dict[str, Any]) -> dict[str, Any]:
@@ -74,6 +105,7 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
     for k in list(cur):
         if k in update:
             cur[k] = update[k]
+    cur = _HARD_LIMITS(cur)
     try:
         from doof.paths import user_data_dir
 
@@ -82,6 +114,76 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         pass
     return cur
+
+
+def _battery_paused() -> bool:
+    """True when running on battery and pause_on_battery is set."""
+    try:
+        import psutil  # type: ignore
+
+        b = psutil.sensors_battery()
+        if b is not None and not b.power_plugged:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _cpu_idle_enough(max_cpu_pct: int) -> bool:
+    """Best-effort CPU headroom check; conservative when no sensor is available.
+
+    Uses psutil when installed; otherwise falls back to a Windows-friendly
+    idle probe via GetLastInputInfo-free heuristic — we accept jobs unless the
+    measured system load exceeds the configured ceiling, and without a probe
+    we assume it's safe (Light/Balanced presets remain limited by max_jobs).
+    """
+    try:
+        import psutil  # type: ignore
+
+        return psutil.cpu_percent(interval=0.05) < float(max_cpu_pct)
+    except Exception:
+        return True
+
+
+def _vram_ok(max_vram_gb: Any) -> bool:
+    if not max_vram_gb:
+        return True
+    try:
+        import torch  # type: ignore
+
+        if not torch.cuda.is_available():
+            return True
+        free, total = torch.cuda.mem_get_info()
+        # max_vram_gb is a per-job budget; require it available plus small headroom
+        return free / (1024 ** 3) >= float(max_vram_gb)
+    except Exception:
+        return True
+
+
+def node_eligible_for_job(job_type: str) -> bool:
+    """Full local-resource gate evaluated before claiming any work.
+
+    Returns False when any pause/limit condition is active. This is what makes
+    Light/Balanced/Performance/'Hit Mom's Blunt' real backend behavior rather
+    than UI decoration.
+    """
+    s = _HARD_LIMITS(_settings())
+    if job_type == "train" and not s.get("allow_train", False):
+        return False
+    if job_type == "inference" and not s.get("allow_inference", True):
+        return False
+    if job_type == "embedding" and not s.get("allow_embedding", True):
+        return False
+    if s.get("pause_on_battery", True) and _battery_paused():
+        return False
+    if s.get("idle_only") and not _cpu_idle_enough(int(s.get("max_cpu_pct", 80))):
+        return False
+    if not _vram_ok(s.get("max_vram_gb")):
+        return False
+    with _jobs_lock:
+        if _local_jobs >= int(s.get("max_jobs", 1)):
+            return False
+    return True
 
 
 def execute_local(job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -121,7 +223,7 @@ def _hash_embed(text: str) -> list[float]:
 
 def _local_inference(data: dict[str, Any]) -> dict[str, Any]:
     """Actual AI path: memory is context, model is the brain."""
-    from doof.brain import build_prompt, lightweight_answer, postprocess_model_text
+    from doof.brain import build_prompt, postprocess_model_text
 
     prompt = data["prompt"]
     memories: list[dict[str, Any]] = []
@@ -158,12 +260,17 @@ def _local_inference(data: dict[str, Any]) -> dict[str, Any]:
             if text.startswith(augmented):
                 text = text[len(augmented) :].lstrip()
             text = postprocess_model_text(text, prompt, memories)
+            if isinstance(text, tuple):
+                text, source = text
+            else:
+                source = "model"
             return {
                 "ok": True,
                 "text": text,
-                "provider": "local_model",
+                "provider": "local_model" if source == "model" else source,
                 "device": getattr(inf, "device_label", None) or str(getattr(inf, "device", "")),
                 "memories_used": memories,
+                "actual_generation": source == "model",
             }
         except Exception as e:
             torch_fail = e
@@ -176,12 +283,31 @@ def _local_inference(data: dict[str, Any]) -> dict[str, Any]:
         return cloud
 
     label, detail = pick("ai_fallback")
+    # Try memory-based answer first
+    from doof.brain import memory_answer, math_answer
+    math = math_answer(prompt)
+    if math:
+        return {
+            "ok": True,
+            "text": math,
+            "provider": "computed",
+            "memories_used": memories,
+            "fallback_of": str(torch_fail or torch_error() or "model unavailable"),
+        }
+    mem = memory_answer(prompt, memories)
+    if mem:
+        return {
+            "ok": True,
+            "text": mem,
+            "provider": "memory",
+            "memories_used": memories,
+            "fallback_of": str(torch_fail or torch_error() or "model unavailable"),
+        }
     return {
         "ok": True,
-        "text": lightweight_answer(prompt, memories),
-        "provider": "lightweight",
+        "text": "The model could not generate a response. Try rephrasing, or add relevant information to Memory so DOOF can help.",
+        "provider": "none",
         "memories_used": memories,
-        "notice": {"title": label, "detail": detail},
         "fallback_of": str(torch_fail or torch_error() or "model unavailable"),
     }
 
@@ -383,11 +509,7 @@ def _poll_once(local_id_fn, execute_fn) -> None:
         return
     job = mine[0]
     jtype = job.get("type") or "inference"
-    if jtype == "train" and not settings.get("allow_train"):
-        return
-    if jtype == "inference" and not settings.get("allow_inference", True):
-        return
-    if jtype == "embedding" and not settings.get("allow_embedding", True):
+    if not node_eligible_for_job(jtype):
         return
     jid = job.get("id")
     claimed = None

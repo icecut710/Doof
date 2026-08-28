@@ -1,4 +1,4 @@
-"""DOOF local HTTP API — v0.3.0.
+"""DOOF local HTTP API — v3.0.0.
 
 Implementation lives in ``doof.api_full`` so the complete handler surface can
 be shipped as one module. This file re-exports the public API.

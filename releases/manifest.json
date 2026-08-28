@@ -1,21 +1,21 @@
 {
-  "schema": 1,
-  "published_at": "2026-08-25T14:45:00Z",
-  "channels": {"stable": "0.3.0", "beta": "0.3.0"},
+  "product": "DOOF",
+  "channel": "stable",
+  "platform": "windows",
+  "arch": "x64",
   "releases": [
     {
-      "version": "0.3.0",
+      "version": "3.0.0",
       "channel": "stable",
       "platform": "windows",
-      "architecture": "x86_64",
-      "mandatory": false,
-      "min_supported": "0.2.0",
-      "notes_human": "DOOF v0.3 production pass: network compute, verified updates, Control Room, contribution controls, and UI polish.",
-      "notes": "Global Supabase job queue; SHA-256 update verification; role-gated admin controls; expanded contribution limits; UI polish.",
-      "download_url": "",
+      "arch": "x64",
+      "package": "Doof-v3.0.0-Windows-x64.zip",
       "sha256": "",
-      "published_at": "2026-08-25T14:45:00Z",
-      "kind": "full"
+      "mandatory": false,
+      "min_supported": "2.0.0",
+      "release_notes": "DOOF v3.0 — Production release with inference routing, real AI fallback, polished UI, auto-updates, and distributed compute.",
+      "release_date": "2026-08-25",
+      "download_url": "https://github.com/icecut710/Doof/releases/download/v3.0.0/Doof-v3.0.0-Windows-x64.zip"
     }
   ]
 }

@@ -324,6 +324,12 @@ def _make_splash(app: QApplication):
         int(Qt.AlignmentFlag.AlignCenter),
         "Warming the grill…",
     )
+    # Draw subtle grid pattern for "neural" feel
+    p.setPen(QColor("#18181b"))
+    for i in range(0, 520, 40):
+        p.drawLine(i, 0, i, 360)
+    for i in range(0, 360, 40):
+        p.drawLine(0, i, 520, i)
     p.end()
     splash = QSplashScreen(pix)
     splash.show()
@@ -337,6 +343,8 @@ def _make_splash(app: QApplication):
 
 
 def main() -> int:
+    from doof import __version__
+
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     if os.environ.get("DOOF_SOFTWARE_RENDERING") == "1":
         os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --no-sandbox")
@@ -344,7 +352,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("DOOF")
     app.setOrganizationName("DOOF")
-    app.setApplicationVersion("0.3.0")
+    app.setApplicationVersion(__version__)
 
     splash = _make_splash(app)
 

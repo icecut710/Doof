@@ -1,8 +1,3336 @@
-"""Full DOOF HTTP API (zlib+base64 body in _api_full_{a,b}.z64)."""
+"""DOOF local HTTP API — v3.0.0.
+
+Endpoints
+---------
+GET  /api/health
+GET  /api/hardware
+GET  /api/model
+GET  /api/checkpoints
+GET  /api/models/versions
+GET  /api/models/manifest
+GET  /api/training
+GET  /api/training/jobs
+GET  /api/approved_examples
+GET  /api/approved_examples/count
+GET  /api/network
+GET  /api/brain_network
+GET  /api/settings
+GET  /api/cloud
+GET  /api/knowledge
+GET  /api/memory
+GET  /api/memory/search
+GET  /api/feedback
+GET  /api/nodes
+GET  /api/scheduler
+GET  /api/version
+GET  /api/readiness
+GET  /api/status
+GET  /api/boot
+GET  /api/compute/settings
+GET  /api/device
+GET  /api/models
+GET  /api/updates/check
+GET  /api/updates/status
+GET  /api/updates/settings
+GET  /api/admin/overview
+
+POST /api/generate
+POST /api/training/start
+POST /api/training/stop
+POST /api/training/build_dataset
+POST /api/training/jobs
+POST /api/training/jobs/{id}/cancel
+POST /api/training/jobs/{id}/retry
+POST /api/model/load
+POST /api/reload
+POST /api/settings
+POST /api/knowledge          (legacy compat)
+POST /api/memory
+POST /api/memory/{id}/approve
+POST /api/memory/{id}/promote
+POST /api/feedback
+POST /api/feedback/{id}/approve
+POST /api/nodes/register
+POST /api/nodes/heartbeat
+POST /api/models/promote
+POST /api/models/promote_with_eval
+POST /api/models/sync
+POST /api/models/rollback
+POST /api/brain_network/pool
+POST /api/approved_examples
+
+DELETE /api/memory/{id}
+DELETE /api/nodes/{id}
+DELETE /api/approved_examples/{id}
+"""
 from __future__ import annotations
-import base64, zlib
+
+from doof import DOOF_VERSION
+
+try:
+    from doof import DOOF_PROTOCOL
+except ImportError:
+    DOOF_PROTOCOL = "1"
+
+DOOF_API_VERSION = DOOF_VERSION
+
+import json
+import logging
+import os
+import platform
+import re
+import sys
+import threading
+import time
+import traceback
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-_dir = Path(__file__).resolve().parent
-_blob = (_dir / "_api_full_a.z64").read_text(encoding="ascii") + (_dir / "_api_full_b.z64").read_text(encoding="ascii")
-_code = zlib.decompress(base64.b64decode(_blob)).decode("utf-8")
-exec(compile(_code, str(Path(__file__).resolve()), "exec"), globals())
+from typing import Any
+from urllib.parse import urlparse
+
+# ---------------------------------------------------------------------------
+# Structured logging
+# ---------------------------------------------------------------------------
+
+_log = logging.getLogger("doof.api")
+
+
+def _request_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+# ---------------------------------------------------------------------------
+# .env loading
+# ---------------------------------------------------------------------------
+
+
+def _load_env() -> None:
+    """Load .env from EXE dir, %LOCALAPPDATA%/DOOF, then cwd. Never require a repo checkout."""
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        return
+    candidates: list[Path] = []
+    try:
+        from doof.paths import is_frozen, user_data_dir
+        if is_frozen():
+            candidates.append(Path(sys.executable).resolve().parent / ".env")
+            candidates.append(user_data_dir() / ".env")
+    except Exception:
+        pass
+    candidates.append(Path.cwd() / ".env")
+    for p in candidates:
+        if p.is_file():
+            load_dotenv(p)
+            return
+    load_dotenv()
+
+
+try:
+    _load_env()
+except Exception:
+    pass
+
+from database import get_db
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+try:
+    from doof.paths import bundle_root, user_data_dir, checkpoints_dir, is_frozen
+    ROOT = bundle_root()
+    DATA_DIR = user_data_dir()
+    CKPT_DIR = checkpoints_dir()
+    _FROZEN = is_frozen()
+except Exception:
+    ROOT = Path(__file__).resolve().parents[1]
+    DATA_DIR = ROOT / "data"
+    CKPT_DIR = ROOT / "checkpoints"
+    _FROZEN = False
+
+TRAIN = DATA_DIR / "train.txt"
+KNOW = DATA_DIR / "knowledge.json"
+SETT = DATA_DIR / "settings.json"
+NODES_PATH = DATA_DIR / "nodes.json"
+VERSIONS_PATH = DATA_DIR / "brain_versions.json"
+PROFILES_PATH = DATA_DIR / "profiles.json"
+SESSIONS_PATH = DATA_DIR / "sessions.json"
+
+# Heartbeat thread interval (seconds)
+_HEARTBEAT_INTERVAL = 30
+# How long before a node is considered stale (seconds)
+_NODE_TIMEOUT = 60
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+_lock = threading.Lock()
+_inf = None
+_loaded: str | None = None
+# Boot-time checkpoint probe (architecture from disk, no model in memory)
+_boot_probe: dict[str, Any] | None = None
+_train: dict[str, Any] = {
+    "running": False,
+    "step": 0,
+    "loss": None,
+    "epoch": 0,
+    "message": "idle",
+    "history": [],
+    "lr": 3e-4,
+    "speed": None,
+    "eta_seconds": None,
+    "dataset_version": None,
+}
+_stop = threading.Event()
+_settings = {
+    "temperature": 0.7,
+    "max_new_tokens": 80,
+    "top_k": 50,
+    "context_length": 64,
+}
+
+# Local node identity (set on first registration / heartbeat)
+_local_node_id: str | None = None
+
+# ---------------------------------------------------------------------------
+# Auth — local profiles (Owner / Trusted) + sessions
+# ---------------------------------------------------------------------------
+
+
+def _utcnow() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _load_profiles() -> list[dict[str, Any]]:
+    if not PROFILES_PATH.exists():
+        return []
+    try:
+        data = json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_profiles(profiles: list[dict[str, Any]]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    PROFILES_PATH.write_text(
+        json.dumps(profiles, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _hash_password(password: str, salt: str) -> str:
+    import hashlib
+
+    return hashlib.scrypt(
+        password.encode("utf-8"), salt=salt.encode("utf-8"), n=16384, r=8, p=1
+    ).hex()
+
+
+def _public_profile(p: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": p.get("id"),
+        "email": p.get("email"),
+        "name": p.get("name") or (p.get("email") or "").split("@")[0],
+        "role": p.get("role", "trusted"),
+        "created_at": p.get("created_at"),
+        "provider": p.get("provider", "local"),
+    }
+
+
+SESSION_TTL_SECONDS = 60 * 60 * 24 * 30  # Remember-me sessions last 30 days
+
+
+def _create_session(profile_id: str) -> str:
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    sessions: list[dict[str, Any]] = []
+    if SESSIONS_PATH.exists():
+        try:
+            sessions = json.loads(SESSIONS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            sessions = []
+    now = time.time()
+    # Drop expired sessions on every write
+    sessions = [
+        s
+        for s in sessions
+        if s.get("expires_at", 0) > now
+    ]
+    sessions.append(
+        {
+            "token": token,
+            "profile_id": profile_id,
+            "created_at": _utcnow(),
+            "expires_at": now + SESSION_TTL_SECONDS,
+        }
+    )
+    sessions = sessions[-200:]
+    SESSIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SESSIONS_PATH.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
+    return token
+
+
+def _profile_from_token(token: str | None) -> dict[str, Any] | None:
+    if not token:
+        return None
+    try:
+        sessions = json.loads(SESSIONS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    entry = next((s for s in sessions if s.get("token") == token), None)
+    if not entry:
+        return None
+    # Expired tokens are invalid — no DOOF access.
+    if float(entry.get("expires_at", 0)) < time.time():
+        return None
+    profile = next(
+        (p for p in _load_profiles() if p.get("id") == entry.get("profile_id")), None
+    )
+    return _public_profile(profile) if profile else None
+
+
+def _bearer_token(h: BaseHTTPRequestHandler) -> str | None:
+    auth = h.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return None
+
+
+def _supabase_signin(
+    email: str, password: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Try Supabase password auth.
+
+    Returns ``(user, None)`` on success, ``(None, "email_unverified")`` when
+    the account exists but hasn't confirmed their email, or ``(None, None)``
+    when Supabase is not configured / unreachable (local fallback).
+    """
+    cfg = _supabase_cfg()
+    if not cfg:
+        return None, None
+    url, key = cfg
+    try:
+        from urllib.error import HTTPError
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            f"{url}/auth/v1/token?grant_type=password",
+            data=json.dumps({"email": email, "password": password}).encode(),
+            headers={"apikey": key, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        user = data.get("user") or {}
+        return {"id": user.get("id"), "email": user.get("email"), "provider": "supabase"}, None
+    except HTTPError as e:
+        try:
+            msg = json.loads(e.read().decode()).get("msg", "")
+        except Exception:
+            msg = ""
+        if "confirm" in msg.lower() or "verified" in msg.lower():
+            return None, "email_unverified"
+        return None, None
+    except Exception:
+        return None, None
+
+
+def _supabase_cfg() -> tuple[str, str] | None:
+    url = (
+        os.environ.get("SUPABASE_URL")
+        or os.environ.get("DOOF_SUPABASE_URL")
+        or ""
+    ).rstrip("/")
+    key = (
+        os.environ.get("SUPABASE_ANON_KEY")
+        or os.environ.get("DOOF_SUPABASE_ANON_KEY")
+        or ""
+    )
+    return (url, key) if url and key else None
+
+
+def _verify_redirect() -> str:
+    """Where Supabase tells the browser to go after a confirmation link is
+    clicked.  DOOF serves this URL so verification resolves to the app."""
+    return os.environ.get("DOOF_VERIFY_REDIRECT", "http://localhost:3000")
+
+
+def _supabase_signup(email: str, password: str) -> tuple[int, dict[str, Any]]:
+    """Real signup through Supabase Auth (sends verification email)."""
+    cfg = _supabase_cfg()
+    if not cfg:
+        return 0, {}
+    url, key = cfg
+    try:
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            f"{url}/auth/v1/signup",
+            data=json.dumps(
+                {
+                    "email": email,
+                    "password": password,
+                    "options": {"emailRedirectTo": _verify_redirect()},
+                }
+            ).encode(),
+            headers={"apikey": key, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        user = data.get("user") or {}
+        # NEVER auto-authenticate a fresh signup. Even when Supabase returns
+        # an access_token (confirmation disabled), require verified identity:
+        # only proceed if the user's email is already confirmed.
+        confirmed = bool(user.get("email_confirmed_at")) or bool(
+            (user.get("identities") or [])
+            and all(i.get("email_verified") for i in user.get("identities") or [{}])
+        )
+        if not data.get("access_token") or not confirmed:
+            return 200, {"status": "verify_email_sent"}
+        profiles = _load_profiles()
+        profile = next((p for p in profiles if p.get("email") == email), None)
+        if profile is None:
+            role = "owner" if not profiles else "trusted"
+            profile = {
+                "id": user.get("id") or str(uuid.uuid4()),
+                "email": email,
+                "name": "",
+                "role": role,
+                "created_at": _utcnow(),
+                "provider": "supabase",
+                "email_verified": True,
+            }
+            profiles.append(profile)
+            _save_profiles(profiles)
+        token = _create_session(profile["id"])
+        return 200, {"token": token, "profile": _public_profile(profile)}
+    except Exception as e:
+        body = getattr(e, "read", None)
+        msg = ""
+        try:
+            msg = json.loads(body().decode()).get("msg", "") if callable(body) else ""
+        except Exception:
+            pass
+        if "already registered" in msg or "already exists" in msg:
+            return 409, {"error": "account already exists — sign in instead"}
+        return 502, {"error": f"Supabase connection lost ({msg or e})"}
+
+
+def auth_verify(token: str, token_type: str = "signup") -> tuple[int, dict[str, Any]]:
+    """Complete a Supabase email-verification link clicked in the browser.
+
+    Handles both the older ``token`` body and the current ``token_hash``
+    query used by Supabase confirmation emails.
+    """
+    cfg = _supabase_cfg()
+    if not cfg:
+        return 400, {"error": "email verification requires Supabase"}
+    url, key = cfg
+    token = (token or "").strip()
+    if not token:
+        return 400, {"error": "missing verification token"}
+    try:
+        from urllib.request import Request, urlopen
+
+        # Prefer token_hash (current Supabase email templates).
+        payload: dict[str, Any] = {"type": token_type or "signup"}
+        if len(token) > 40 and token.count("-") == 0:
+            payload["token_hash"] = token
+        payload["token"] = token
+        req = Request(
+            f"{url}/auth/v1/verify",
+            data=json.dumps(payload).encode(),
+            headers={"apikey": key, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        body = getattr(e, "read", None)
+        msg = ""
+        try:
+            msg = json.loads(body().decode()).get("msg", "") if callable(body) else ""
+        except Exception:
+            pass
+        # Implicit-flow confirmation often lands as an access_token instead.
+        if "access_token" in token or token_type == "oauth":
+            return auth_oauth(token)
+        if "invalid" in (msg or "").lower() or "expired" in (msg or "").lower():
+            return 400, {
+                "error": "This verification link is invalid or has expired.",
+                "code": "verify_invalid",
+            }
+        from doof.errors import public_error
+        return 502, public_error(e)
+
+    user = data.get("user") or {}
+    email = (user.get("email") or "").lower()
+    if not email:
+        # No user object — treat as already-verified if a token was accepted.
+        return 200, {"status": "already_verified"}
+
+    profiles = _load_profiles()
+    profile = next((p for p in profiles if p.get("email") == email), None)
+    if profile is None:
+        role = "owner" if not profiles else "trusted"
+        profile = {
+            "id": user.get("id") or str(uuid.uuid4()),
+            "email": email,
+            "name": "",
+            "role": role,
+            "created_at": _utcnow(),
+            "provider": "supabase",
+            "email_verified": True,
+        }
+        profiles.append(profile)
+        _save_profiles(profiles)
+    else:
+        profile["email_verified"] = True
+        _save_profiles(profiles)
+
+    doof_token = _create_session(profile["id"])
+    return 200, {"token": doof_token, "profile": _public_profile(profile)}
+
+
+def auth_config() -> dict[str, Any]:
+    cfg = _supabase_cfg()
+    redirect = _verify_redirect()
+    if not cfg:
+        return {
+            "provider": "local",
+            "oauth": False,
+            "google": "not_configured",
+            "email_verification": False,
+            "mode": "local",
+            "redirect_hint": redirect,
+        }
+    url, key = cfg
+    google_state = "available"
+    try:
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            f"{url}/auth/v1/settings",
+            headers={"apikey": key},
+            method="GET",
+        )
+        with urlopen(req, timeout=4) as resp:
+            settings = json.loads(resp.read())
+        providers = (
+            (settings.get("external") or {})
+            if isinstance(settings, dict)
+            else {}
+        )
+        google_on = False
+        if isinstance(providers, dict):
+            g = providers.get("google")
+            if g is True or (isinstance(g, dict) and g.get("enabled", True)):
+                google_on = True
+            # Some payloads list enabled names.
+            names = providers.get("external") or providers.get("providers") or []
+            if isinstance(names, list) and "google" in names:
+                google_on = True
+        if not google_on and not providers:
+            # Settings reachable but shape unknown — still show the button.
+            google_on = True
+        google_state = "available" if google_on else "not_configured"
+    except Exception:
+        google_state = "temporarily_unavailable"
+    return {
+        "provider": "supabase",
+        "oauth": google_state == "available",
+        "google": google_state,
+        "email_verification": True,
+        "mode": "connected",
+        "redirect_hint": redirect,
+        "authorize_url": (
+            f"{url}/auth/v1/authorize?provider=google&response_type=token"
+            f"&redirect_to={redirect}"
+        ),
+    }
+
+
+def auth_resend(email: str) -> tuple[int, dict[str, Any]]:
+    cfg = _supabase_cfg()
+    if not cfg:
+        return 400, {"error": "email verification requires Supabase"}
+    url, key = cfg
+    try:
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            f"{url}/auth/v1/resend",
+            data=json.dumps(
+                {"type": "signup", "email": email, "options": {"emailRedirectTo": _verify_redirect()}}
+            ).encode(),
+            headers={"apikey": key, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=8) as resp:
+            resp.read()
+        return 200, {"ok": True}
+    except Exception as e:
+        return 502, {"error": f"Couldn't reach Supabase ({e})"}
+
+
+def auth_oauth(access_token: str) -> tuple[int, dict[str, Any]]:
+    """Exchange a Supabase OAuth access token (Google implicit flow) for a
+    DOOF session.  Identity is verified server-side via /auth/v1/user."""
+    cfg = _supabase_cfg()
+    if not cfg:
+        return 400, {"error": "Google sign-in requires Supabase configuration"}
+    url, key = cfg
+    try:
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            f"{url}/auth/v1/user",
+            headers={"apikey": key, "Authorization": f"Bearer {access_token}"},
+            method="GET",
+        )
+        with urlopen(req, timeout=8) as resp:
+            user = json.loads(resp.read())
+        email = (user.get("email") or "").lower()
+        if not email:
+            return 401, {"error": "Google account has no email"}
+        profiles = _load_profiles()
+        profile = next((p for p in profiles if p.get("email") == email), None)
+        if profile is None:
+            role = "owner" if not profiles else "trusted"
+            profile = {
+                "id": user.get("id") or str(uuid.uuid4()),
+                "email": email,
+                "name": (user.get("user_metadata") or {}).get("full_name", ""),
+                "role": role,
+                "created_at": _utcnow(),
+                "provider": "google",
+                "email_verified": True,
+            }
+            profiles.append(profile)
+            _save_profiles(profiles)
+        token = _create_session(profile["id"])
+        return 200, {"token": token, "profile": _public_profile(profile)}
+    except Exception as e:
+        return 401, {"error": f"Google authentication failed ({e})"}
+
+
+def _password_problem(password: str) -> str | None:
+    """Server-side password policy — mirrors the client, enforced for real."""
+    if len(password) < 8:
+        return "password must be at least 8 characters"
+    if not re.search(r"[A-Za-z]", password):
+        return "password must contain a letter"
+    if not re.search(r"\d", password):
+        return "password must contain a number"
+    return None
+
+
+def auth_signup(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    email = (body.get("email") or "").strip().lower()
+    password = body.get("password") or ""
+    if not email or not password:
+        return 400, {"error": "email and password required"}
+    if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        return 400, {"error": "enter a valid email address"}
+    problem = _password_problem(password)
+    if problem:
+        return 400, {"error": problem}
+
+    profiles = _load_profiles()
+    if any(p.get("email") == email for p in profiles):
+        return 409, {"error": "account already exists — sign in instead"}
+
+    # Supabase Auth is the real authority when configured — this sends the
+    # verification email and only yields a session once verified.
+    code, payload = _supabase_signup(email, password)
+    if code:
+        return code, payload
+
+    # Local development fallback (no mail service): verified immediately.
+    role = "owner" if not profiles else "trusted"
+    salt = uuid.uuid4().hex
+    profile: dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "email": email,
+        "name": (body.get("name") or "").strip(),
+        "role": role,
+        "salt": salt,
+        "password_hash": _hash_password(password, salt),
+        "created_at": _utcnow(),
+        "provider": "local",
+        "email_verified": True,
+    }
+    profiles.append(profile)
+    _save_profiles(profiles)
+
+    token = _create_session(profile["id"])
+    return 200, {"token": token, "profile": _public_profile(profile)}
+
+
+def auth_login(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    email = (body.get("email") or "").strip().lower()
+    password = body.get("password") or ""
+    if not email or not password:
+        return 400, {"error": "email and password required"}
+
+    # Supabase Auth is the real authority when configured.
+    sb_user, sb_err = _supabase_signin(email, password)
+    if sb_err == "email_unverified":
+        return 403, {"error": "Verify your email before entering DOOF.", "code": "email_unverified"}
+
+    profiles = _load_profiles()
+    profile = next((p for p in profiles if p.get("email") == email), None)
+
+    if sb_user:
+        if profile is None:
+            role = "owner" if not profiles else "trusted"
+            profile = {
+                "id": sb_user.get("id") or str(uuid.uuid4()),
+                "email": email,
+                "name": "",
+                "role": role,
+                "created_at": _utcnow(),
+                "provider": "supabase",
+                "email_verified": True,
+            }
+            profiles.append(profile)
+            _save_profiles(profiles)
+        token = _create_session(profile["id"])
+        return 200, {"token": token, "profile": _public_profile(profile)}
+
+    # Local fallback
+    if profile is None:
+        return 401, {"error": "no account found — create one first"}
+    if _hash_password(password, profile.get("salt", "")) != profile.get("password_hash"):
+        return 401, {"error": "wrong password"}
+    if profile.get("email_verified") is False:
+        return 403, {"error": "Verify your email before entering DOOF.", "code": "email_unverified"}
+    token = _create_session(profile["id"])
+    return 200, {"token": token, "profile": _public_profile(profile)}
+
+
+# ---------------------------------------------------------------------------
+# CORS / helpers
+# ---------------------------------------------------------------------------
+
+
+def _cors(h: BaseHTTPRequestHandler) -> None:
+    h.send_header("Access-Control-Allow-Origin", "*")
+    h.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+    h.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+
+def _json(h: BaseHTTPRequestHandler, code: int, data: Any) -> None:
+    b = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
+    h.send_response(code)
+    h.send_header("Content-Type", "application/json; charset=utf-8")
+    h.send_header("Content-Length", str(len(b)))
+    _cors(h)
+    h.end_headers()
+    h.wfile.write(b)
+
+
+def _json_err(h: BaseHTTPRequestHandler, err: BaseException, code: int = 500) -> None:
+    from doof.errors import public_error
+
+    payload = public_error(err)
+    _log.error("[api:%s] %s", getattr(h, "_req_id", "?"), payload.get("technical"))
+    _json(h, code, payload)
+
+
+def _body(h: BaseHTTPRequestHandler) -> dict[str, Any]:
+    n = int(h.headers.get("Content-Length", 0))
+    if n <= 0:
+        return {}
+    try:
+        return json.loads(h.rfile.read(n))
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Database adapter proxy
+# ---------------------------------------------------------------------------
+
+
+def _db():
+    """Return the active database adapter (Supabase or local JSON)."""
+    return get_db()
+
+
+# ---------------------------------------------------------------------------
+# Hardware / model helpers (preserved from v0.1)
+# ---------------------------------------------------------------------------
+
+
+def _bootstrap_initial_checkpoint() -> Path:
+    """First run with no trained checkpoint: create a real, valid initial
+    checkpoint from freshly initialized weights.  This is the model's
+    legitimate untrained state — not fake training.  Training from here is
+    fully real; the brain simply starts at version 1.0.0 untrained."""
+    import torch
+
+    from doof.model import DOOFTransformer
+    from doof.tokenizer import DOOFTokenizer
+
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    tok = DOOFTokenizer()
+    model = DOOFTransformer(
+        vocab_size=tok.vocab_size,
+        max_seq_len=128,
+        d_model=256,
+    )
+    path = CKPT_DIR / "doof_v01.pt"
+    if path.exists():
+        # Safety: never clobber a possibly-trained brain.
+        return path
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "step": 0,
+            "loss": None,
+            "model_config": {
+                "vocab_size": tok.vocab_size,
+                "max_seq_len": 128,
+                "d_model": 256,
+                "n_heads": 8,
+                "n_layers": 6,
+            },
+        },
+        path,
+    )
+    # Save tokenizer alongside the checkpoint
+    tok.save_for_checkpoint(CKPT_DIR)
+    _log.info("initialized fresh brain at %s (untrained v1.0.0)", path)
+    return path
+
+
+def _find_ckpt(pref: str | None = None) -> Path:
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    if pref:
+        p = Path(pref) if Path(pref).is_absolute() else ROOT / pref
+        if p.exists():
+            return p
+    for n in ("doof_v01.pt", "doof_v0.1.pt"):
+        if (CKPT_DIR / n).exists():
+            return CKPT_DIR / n
+    steps = sorted(CKPT_DIR.glob("doof_step_*.pt"))
+    if steps:
+        return steps[-1]
+    # Check model cache dir for synced models
+    try:
+        from doof.models.manager import cache_dir as model_cache_dir
+        cached = sorted(model_cache_dir().glob("*.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if cached:
+            return cached[0]
+    except Exception:
+        pass
+    # Read-only bundled checkpoints (fresh frozen install with no trained models yet)
+    try:
+        from doof.paths import bundled_checkpoints_dir
+        bundled = bundled_checkpoints_dir()
+        if bundled.is_dir() and bundled != CKPT_DIR:
+            for n in ("doof_v01.pt", "doof_v0.1.pt"):
+                if (bundled / n).exists():
+                    return bundled / n
+            bsteps = sorted(bundled.glob("doof_step_*.pt"))
+            if bsteps:
+                return bsteps[-1]
+    except Exception:
+        pass
+    # Fresh installation — safely initialize instead of erroring.
+    return _bootstrap_initial_checkpoint()
+
+
+def _try_resolve_best_model() -> Path | None:
+    """At startup, try to find the best approved model from the registry.
+    Returns the path if a better model was found and is ready, else None."""
+    try:
+        from doof.models.manager import resolve_active_model
+        model = resolve_active_model()
+        if model.local_path and Path(model.local_path).is_file():
+            return Path(model.local_path)
+    except Exception:
+        pass
+    return None
+
+
+def get_inf(ckpt: str | None = None):
+    global _inf, _loaded
+    from doof.runtime import import_torch, torch_error
+
+    if import_torch() is None:
+        raise RuntimeError(torch_error() or "torch unavailable")
+    with _lock:
+        path = str(_find_ckpt(ckpt))
+        if _inf is not None and _loaded == path:
+            return _inf
+        from doof.inference import DOOFInference
+        _inf = DOOFInference(path)
+        _loaded = path
+        return _inf
+
+
+def hardware() -> dict[str, Any]:
+    from doof.runtime import probe_hardware
+    return probe_hardware()
+
+
+def _probe_checkpoint() -> dict[str, Any] | None:
+    """Read checkpoint metadata from disk without loading the model into memory."""
+    global _boot_probe
+    if _boot_probe is not None:
+        return _boot_probe
+    try:
+        ckpt_path = _find_ckpt()
+        if not ckpt_path or not Path(ckpt_path).is_file():
+            return None
+        from doof.runtime import import_torch
+        torch = import_torch()
+        if torch is None:
+            return None
+        ck = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+        mc = ck.get("model_config", {})
+        sd = ck.get("model_state_dict", {})
+        param_count = sum(v.numel() for v in sd.values()) if sd else 0
+        _boot_probe = {
+            "checkpoint_path": str(ckpt_path),
+            "checkpoint_name": Path(ckpt_path).name,
+            "checkpoint_size_mb": round(Path(ckpt_path).stat().st_size / (1024 * 1024), 2),
+            "step": ck.get("step"),
+            "loss": ck.get("loss"),
+            "vocab_size": mc.get("vocab_size"),
+            "d_model": mc.get("d_model"),
+            "max_seq_len": mc.get("max_seq_len"),
+            "parameters": param_count,
+            "parameters_m": round(param_count / 1e6, 2) if param_count else 0,
+            "n_layers": sum(1 for k in sd if "transformer.layers." in k and k.endswith(".self_attn.in_proj_weight")) if sd else 0,
+        }
+        return _boot_probe
+    except Exception as e:
+        _log.warning("checkpoint probe failed: %s", e)
+        return None
+
+
+def model_info() -> dict[str, Any]:
+    from doof.runtime import torch_available, torch_error, import_torch
+
+    probe = _probe_checkpoint()
+
+    if _inf is None:
+        # Model not in memory — return what we know from the checkpoint on disk
+        result: dict[str, Any] = {
+            "loaded": False,
+            "lazy": True,
+            "torch_available": torch_available(),
+            "torch_error": torch_error(),
+            "architecture": "decoder-only Transformer",
+            "checkpoint": _loaded,
+        }
+        if probe:
+            result.update({
+                "checkpoint_path": probe["checkpoint_path"],
+                "checkpoint_name": probe["checkpoint_name"],
+                "checkpoint_size_mb": probe["checkpoint_size_mb"],
+                "parameters": probe["parameters"],
+                "parameters_m": probe["parameters_m"],
+                "d_model": probe["d_model"],
+                "max_seq_len": probe["max_seq_len"],
+                "vocab_size": probe["vocab_size"],
+                "step": probe["step"],
+                "loss": probe["loss"],
+                "n_layers": probe["n_layers"],
+                "device": "not loaded",
+                "status": "checkpoint found, not loaded",
+            })
+        else:
+            result["status"] = "no checkpoint"
+        return result
+    try:
+        inf = _inf
+        n = sum(p.numel() for p in inf.model.parameters())
+        return {
+            "loaded": True,
+            "step": getattr(inf, "step", 0),
+            "loss": getattr(inf, "loss", None),
+            "parameters": n,
+            "parameters_m": round(n / 1e6, 2),
+            "d_model": inf.model.d_model,
+            "max_seq_len": inf.model.max_seq_len,
+            "vocab_size": inf.tokenizer.vocab_size,
+            "device": str(inf.device),
+            "checkpoint": _loaded,
+            "architecture": "decoder-only Transformer",
+            "torch_available": True,
+            "status": "loaded",
+            **({"n_layers": probe["n_layers"]} if probe else {}),
+        }
+    except Exception as e:
+        from doof.errors import public_error
+        err = public_error(e)
+        return {"loaded": False, "error": err["title"], "technical": err["technical"], "status": "error"}
+
+
+def _model_manifest() -> dict[str, Any]:
+    """Model manifest for shared model distribution across clients."""
+    probe = _probe_checkpoint()
+    hw = hardware()
+    db = _db()
+    models = []
+    try:
+        models = db.list_models()
+    except Exception:
+        pass
+
+    # Canonical manifest
+    manifest: dict[str, Any] = {
+        "product": "DOOF",
+        "current_version": DOOF_VERSION,
+        "min_supported": "2.0.0",
+        "models": [],
+        "versions": [],
+    }
+
+    # Brain versions with production status — how clients discover a promoted model
+    try:
+        versions = db.get_versions()
+    except Exception:
+        versions = []
+    prod_version = None
+    for v in sorted(versions, key=lambda x: x.get("promoted_at") or "", reverse=True):
+        entry = {
+            "checkpoint_name": v.get("checkpoint_name"),
+            "label": v.get("label"),
+            "status": v.get("status"),
+            "promoted_at": v.get("promoted_at"),
+            "eval_passed": v.get("eval_passed"),
+            "perplexity": v.get("perplexity"),
+            "sha256": v.get("sha256"),
+            "download_url": v.get("download_url"),
+            "model_id": "doof-base",
+        }
+        manifest["versions"].append(entry)
+        if v.get("status") == "production" and prod_version is None:
+            prod_version = v
+
+    # Add the bundled model
+    if probe:
+        manifest["models"].append({
+            "model_id": "doof-base",
+            "version": DOOF_VERSION,
+            "architecture": "decoder-only Transformer",
+            "parameters": probe.get("parameters"),
+            "parameters_m": probe.get("parameters_m"),
+            "d_model": probe.get("d_model"),
+            "vocab_size": probe.get("vocab_size"),
+            "max_seq_len": probe.get("max_seq_len"),
+            "n_layers": probe.get("n_layers"),
+            "step": probe.get("step"),
+            "loss": probe.get("loss"),
+            "checkpoint_name": probe.get("checkpoint_name"),
+            "checkpoint_size_mb": probe.get("checkpoint_size_mb"),
+            "local": True,
+            "source": "bundled",
+        })
+        if prod_version is not None:
+            manifest["models"][-1]["production_checkpoint"] = prod_version.get("checkpoint_name")
+            manifest["models"][-1]["production_label"] = prod_version.get("label")
+
+    # Add models from registry (Supabase or local)
+    for m in models:
+        manifest["models"].append({
+            "model_id": m.get("model_id", "unknown"),
+            "version": m.get("version", "0.0.0"),
+            "architecture": m.get("architecture", "decoder-only Transformer"),
+            "parameters": m.get("parameters"),
+            "d_model": m.get("d_model"),
+            "download_url": m.get("download_url"),
+            "sha256": m.get("sha256"),
+            "size_bytes": m.get("size_bytes"),
+            "source": "registry",
+        })
+
+    return manifest
+
+
+def list_ckpts() -> list[dict[str, Any]]:
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    db = _db()
+    try:
+        versions = db.get_versions()
+    except Exception:
+        versions = []
+    version_map = {v["checkpoint_name"]: v for v in versions}
+    out = []
+    for p in sorted(CKPT_DIR.glob("*.pt")):
+        m: dict[str, Any] = {
+            "name": p.name,
+            "path": str(p),
+            "size_mb": round(p.stat().st_size / (1024 * 1024), 2),
+            "mtime": p.stat().st_mtime,
+            "loaded": _loaded == str(p),
+        }
+        vinfo = version_map.get(p.name, {})
+        m["version_label"] = vinfo.get("label")
+        m["status"] = vinfo.get("status", "archived")
+        try:
+            import torch
+            # Use mmap + weights_only to read only header metadata without loading full state_dict
+            ck = torch.load(p, map_location="cpu", weights_only=False, mmap=True)
+            m["step"] = ck.get("step")
+            m["loss"] = ck.get("loss")
+            mc = ck.get("model_config") or {}
+            m["d_model"] = mc.get("d_model")
+            m["max_seq_len"] = mc.get("max_seq_len")
+            del ck
+        except Exception:
+            pass
+        out.append(m)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Brain version registry
+# ---------------------------------------------------------------------------
+
+
+def _load_versions() -> list[dict[str, Any]]:
+    """Load brain versions from the active database adapter."""
+    db = _db()
+    try:
+        return db.get_versions()
+    except Exception:
+        if VERSIONS_PATH.exists():
+            try:
+                return json.loads(VERSIONS_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return []
+
+
+def _save_versions(versions: list[dict[str, Any]]) -> None:
+    """Persist brain versions via the database adapter."""
+    db = _db()
+    for v in versions:
+        try:
+            db.insert_version(v)
+        except Exception:
+            pass
+
+
+def promote_checkpoint(
+    checkpoint_name: str,
+    label: str,
+    promoted_by: str = "system",
+) -> dict[str, Any]:
+    """Mark a checkpoint as production, demoting any current production.
+
+    **Never auto-promote without evaluation.**  If the checkpoint's brain
+    version record has no evaluation, the promotion will still succeed but
+    the version is flagged with ``eval_passed=None``.
+    """
+    versions = _load_versions()
+    db = _db()
+    # Demote current production
+    new_versions = []
+    for v in versions:
+        if v.get("status") == "production":
+            try:
+                db.update_version(v["id"], status="archived",
+                                  promoted_at=v.get("promoted_at"))
+            except Exception:
+                v["status"] = "archived"
+            new_versions.append(v)
+        else:
+            new_versions.append(v)
+
+    # Find or create entry
+    existing = next(
+        (v for v in new_versions if v.get("checkpoint_name") == checkpoint_name),
+        None,
+    )
+    promoted_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if existing:
+        try:
+            db.update_version(
+                existing["id"],
+                label=label,
+                status="production",
+                promoted_at=promoted_at,
+                promoted_by=promoted_by,
+            )
+        except Exception:
+            pass
+        existing.update({
+            "label": label,
+            "status": "production",
+            "promoted_at": promoted_at,
+            "promoted_by": promoted_by,
+        })
+    else:
+        record = {
+            "id": str(uuid.uuid4()),
+            "checkpoint_name": checkpoint_name,
+            "label": label,
+            "status": "production",
+            "promoted_at": promoted_at,
+            "promoted_by": promoted_by,
+            "created_at": promoted_at,
+        }
+        try:
+            db.insert_version(record)
+        except Exception:
+            pass
+        versions.append(record)
+        existing = record
+
+    # Force reload of inference
+    global _inf, _loaded
+    with _lock:
+        _inf = None
+        _loaded = None
+
+    # Publish the checkpoint file to shared model storage so other clients can
+    # actually download it — status flip alone leaves remote nodes stranded.
+    try:
+        ckpt_path = checkpoints_dir() / checkpoint_name
+        if not ckpt_path.is_file():
+            # Promoting a bundled (read-only) checkpoint is still valid —
+            # look in the immutable bundle before giving up.
+            try:
+                from doof.paths import bundled_checkpoints_dir
+                _b = bundled_checkpoints_dir() / checkpoint_name
+                if _b.is_file():
+                    ckpt_path = _b
+            except Exception:
+                pass
+        if ckpt_path.is_file():
+            import hashlib
+
+            h = hashlib.sha256()
+            with ckpt_path.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    h.update(chunk)
+            sha = h.hexdigest()
+            db2 = _db()
+            url = ""
+            if hasattr(db2, "upload_model_blob"):
+                try:
+                    url = db2.upload_model_blob("doof-base", checkpoint_name.replace(".pt", ""), str(ckpt_path), sha)
+                except Exception:
+                    url = ""
+            # Register the model in the model registry so other clients can
+            # discover it via resolve_active_model() / list_models().
+            try:
+                db2.insert_model({
+                    "model_id": "doof-base",
+                    "version": DOOF_VERSION,
+                    "label": label,
+                    "format": "doof-pt",
+                    "size_bytes": ckpt_path.stat().st_size,
+                    "sha256": sha,
+                    "download_url": url,
+                    "channel": "stable",
+                    "status": "approved",
+                    "cpu_supported": True,
+                    "gpu_supported": True,
+                    "min_ram_gb": 2.0,
+                    "recommended_ram_gb": 4.0,
+                    "min_vram_gb": 0.0,
+                    "recommended_vram_gb": 2.0,
+                    "local_path": str(ckpt_path),
+                    "installed": True,
+                    "verified": True,
+                })
+            except Exception:
+                pass
+            try:
+                db2.update_version(existing["id"], sha256=sha,
+                                   download_url=url or f"local://{checkpoint_name}")
+            except Exception:
+                existing["sha256"] = sha
+                existing["download_url"] = url or f"local://{checkpoint_name}"
+            if url:
+                print(f"[models] published {checkpoint_name} to model storage (sha256 {sha[:12]}…)")
+            elif sb:
+                # Cloud configured but upload failed (offline / unreachable).
+                # Local checkpoint is preserved; queue for retry at next start.
+                _queue_pending_model_upload(checkpoint_name, str(ckpt_path), sha)
+    except Exception:
+        pass  # never fail promotion because the network is down — local works
+
+    return {"ok": True, "checkpoint": checkpoint_name, "label": label,
+            "eval_passed": existing.get("eval_passed")}
+
+
+def _pending_model_uploads_path() -> Path:
+    return DATA_DIR / "pending_model_uploads.json"
+
+
+def _queue_pending_model_upload(checkpoint_name: str, path: str, sha: str) -> None:
+    """Record a promoted checkpoint that failed to upload so sync can resume
+    later - DOOF never pretends the upload succeeded."""
+    try:
+        p = _pending_model_uploads_path()
+        items: list[dict[str, Any]] = []
+        if p.is_file():
+            items = json.loads(p.read_text(encoding="utf-8"))
+        if not any(i.get("checkpoint_name") == checkpoint_name for i in items):
+            items.append({
+                "checkpoint_name": checkpoint_name,
+                "path": path,
+                "sha256": sha,
+                "model_id": "doof-base",
+                "version": checkpoint_name.replace(".pt", ""),
+                "queued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            })
+        p.write_text(json.dumps(items, indent=2), encoding="utf-8")
+        _log.info("[models] queued pending upload for %s (cloud unreachable)", checkpoint_name)
+    except Exception:
+        pass
+
+
+def _retry_pending_model_uploads() -> int:
+    """Re-attempt queued model uploads. Returns number uploaded. Offline-safe."""
+    uploaded = 0
+    try:
+        p = _pending_model_uploads_path()
+        if not p.is_file():
+            return 0
+        items = json.loads(p.read_text(encoding="utf-8"))
+        if not items:
+            return 0
+        db2 = _db()
+        if not hasattr(db2, "upload_model_blob"):
+            return 0
+        remaining: list[dict[str, Any]] = []
+        for item in items:
+            path = item.get("path") or ""
+            if not Path(path).is_file():
+                continue
+            try:
+                url = db2.upload_model_blob(
+                    item.get("model_id") or "doof-base",
+                    str(item.get("version") or ""),
+                    path,
+                    str(item.get("sha256") or ""),
+                )
+                if url:
+                    uploaded += 1
+                    try:
+                        db2.insert_model({
+                            "model_id": item.get("model_id") or "doof-base",
+                            "version": item.get("version") or DOOF_VERSION,
+                            "label": item.get("checkpoint_name") or "",
+                            "format": "doof-pt",
+                            "size_bytes": Path(path).stat().st_size,
+                            "sha256": item.get("sha256") or "",
+                            "download_url": url,
+                            "channel": "stable",
+                            "status": "approved",
+                            "local_path": path,
+                            "installed": True,
+                            "verified": True,
+                        })
+                    except Exception:
+                        pass
+                    continue
+            except Exception:
+                pass
+            remaining.append(item)
+        if uploaded:
+            _log.info("[models] resumed %d pending model upload(s)", uploaded)
+        p.write_text(json.dumps(remaining, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return uploaded
+
+
+# ---------------------------------------------------------------------------
+# Knowledge (legacy compat)
+# ---------------------------------------------------------------------------
+
+
+def knowledge_items() -> list[dict[str, Any]]:
+    if KNOW.exists():
+        try:
+            return json.loads(KNOW.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    items = []
+    if TRAIN.exists():
+        for i, line in enumerate(TRAIN.read_text(encoding="utf-8").splitlines()):
+            if line.strip():
+                items.append(
+                    {"id": f"k-{i}", "text": line.strip(), "approved": True, "source": "train.txt"}
+                )
+    return items
+
+
+def save_knowledge(items: list[dict[str, Any]]) -> None:
+    KNOW.parent.mkdir(parents=True, exist_ok=True)
+    KNOW.write_text(json.dumps(items, indent=2, ensure_ascii=False), encoding="utf-8")
+    lines = [it["text"] for it in items if it.get("approved") and it.get("text")]
+    TRAIN.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Memory endpoints
+# ---------------------------------------------------------------------------
+
+
+def _get_store():
+    from doof.intelligence.store import get_store
+    return get_store()
+
+
+# ---------------------------------------------------------------------------
+# Feedback
+# ---------------------------------------------------------------------------
+
+
+def _load_feedback() -> list[dict[str, Any]]:
+    """Load feedback from the active database adapter."""
+    db = _db()
+    try:
+        return db.get_feedback()
+    except Exception:
+        feedback_path = DATA_DIR / "feedback.json"
+        if feedback_path.exists():
+            try:
+                data = json.loads(feedback_path.read_text(encoding="utf-8"))
+                return data if isinstance(data, list) else []
+            except Exception:
+                pass
+        return []
+
+
+def _save_feedback(items: list[dict[str, Any]]) -> None:
+    """Persist feedback via the database adapter."""
+    db = _db()
+    for item in items:
+        try:
+            db.insert_feedback(item)
+        except Exception:
+            pass
+
+
+def add_feedback(
+    prompt: str,
+    response: str,
+    rating: str,
+    correction: str = "",
+    created_by: str = "local",
+    memories_used: list | None = None,
+) -> dict[str, Any]:
+    from doof.intelligence.quality import score_response
+    db = _db()
+    item: dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "prompt": prompt,
+        "response": response,
+        "rating": rating,
+        "correction": correction,
+        "created_by": created_by,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "memories_used": memories_used or [],
+        "approved": rating == "good" or bool(correction),
+    }
+    quality = score_response(prompt, correction or response, rating=rating)
+    item["quality"] = quality["total"]
+    item["training_ready"] = quality["training_ready"]
+    try:
+        db.insert_feedback(item)
+    except Exception:
+        _save_feedback(_load_feedback() + [item])
+    return item
+
+
+def approve_feedback(feedback_id: str, approved_by: str = "local") -> dict[str, Any] | None:
+    """Promote an approved feedback item into the ``approved_examples`` table.
+
+    This is the **only** sanctioned path from raw conversation feedback to
+    training data.  The original feedback is *not* trained on directly.
+    """
+    db = _db()
+    feedback_items = _load_feedback()
+    fb = next((f for f in feedback_items if f.get("id") == feedback_id), None)
+    if fb is None:
+        return None
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    example: dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "prompt": fb.get("prompt", ""),
+        "response": fb.get("correction") or fb.get("response", ""),
+        "rating": fb.get("rating", "good"),
+        "correction": fb.get("correction", ""),
+        "quality": fb.get("quality", 0),
+        "training_ready": fb.get("training_ready", True),
+        "approved": True,
+        "approved_at": now,
+        "approved_by": approved_by,
+        "created_by": fb.get("created_by", "local"),
+        "created_at": fb.get("created_at", now),
+        "source": "feedback",
+        "memory_ids": fb.get("memories_used", []),
+    }
+    try:
+        result = db.insert_approved_example(example)
+        # Mark the original feedback as approved (but NOT automatically
+        # training-ready — it still needs quality scoring)
+        db.update_feedback(feedback_id, approved=True)
+        result["source_feedback_id"] = feedback_id
+        return result
+    except Exception:
+        # Local fallback
+        examples_path = DATA_DIR / "approved_examples.json"
+        examples = []
+        if examples_path.exists():
+            try:
+                examples = json.loads(examples_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        examples.append(example)
+        examples_path.write_text(
+            json.dumps(examples, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        example["source_feedback_id"] = feedback_id
+        return example
+
+
+# ---------------------------------------------------------------------------
+# Nodes
+# ---------------------------------------------------------------------------
+
+
+def _load_nodes() -> list[dict[str, Any]]:
+    """Load nodes from the active database adapter."""
+    db = _db()
+    try:
+        return db.get_nodes()
+    except Exception:
+        if NODES_PATH.exists():
+            try:
+                data = json.loads(NODES_PATH.read_text(encoding="utf-8"))
+                return data if isinstance(data, list) else []
+            except Exception:
+                pass
+        return []
+
+
+def _save_nodes(nodes: list[dict[str, Any]]) -> None:
+    """Persist nodes via the database adapter (upsert each)."""
+    db = _db()
+    for n in nodes:
+        try:
+            db.upsert_node(n)
+        except Exception:
+            pass
+
+
+def _seed_train_txt() -> None:
+    """Copy bundled train.txt into the writable user-data dir on first run."""
+    dest = DATA_DIR / "train.txt"
+    if dest.is_file() and dest.stat().st_size > 20:
+        return
+    for src in (
+        ROOT / "data_seed" / "train.txt",
+        ROOT / "data" / "train.txt",
+        Path(__file__).resolve().parents[1] / "data" / "train.txt",
+    ):
+        if src.is_file():
+            try:
+                dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            except Exception:
+                pass
+            return
+
+
+def _dedupe_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for n in nodes:
+        nid = str(n.get("id") or n.get("name") or "")
+        if not nid or nid in seen:
+            continue
+        seen.add(nid)
+        out.append(n)
+    return out
+
+
+def _looks_weak(text: str) -> bool:
+    t = (text or "").strip()
+    if len(t) < 12:
+        return True
+    letters = sum(ch.isalpha() for ch in t)
+    if letters < max(8, int(len(t) * 0.35)):
+        return True
+    low = t.lower()
+    if low.count("kaeden likes") >= 2 and len(t) < 240:
+        return True
+    return False
+
+
+def _answer_from_memory(prompt: str, memories: list[dict[str, Any]] | None = None) -> str:
+    """Emergency fallback only — returns honest status, not canned AI text."""
+    try:
+        from doof.brain import memory_answer, math_answer
+        math = math_answer(prompt or "")
+        if math:
+            return math
+        mem = memory_answer(prompt or "", memories or [])
+        if mem:
+            return mem
+        return (
+            "The model could not generate a response. "
+            "Try rephrasing, or add relevant information to Memory so DOOF can help."
+        )
+    except Exception:
+        return (
+            "The model could not generate a response. "
+            "Try rephrasing, or add relevant information to Memory so DOOF can help."
+        )
+
+
+def _machine_id() -> str:
+    """Stable per-install id so two PCs never share the node primary key 'local'."""
+    global _local_node_id
+    if _local_node_id:
+        return _local_node_id
+    path = DATA_DIR / "machine_id.txt"
+    try:
+        if path.is_file():
+            mid = path.read_text(encoding="utf-8").strip()
+            if mid:
+                _local_node_id = mid
+                return mid
+    except Exception:
+        pass
+    mid = str(uuid.uuid4())
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(mid, encoding="utf-8")
+    except Exception:
+        pass
+    _local_node_id = mid
+    return mid
+
+
+def _guess_lan_ip() -> str:
+    """Best-effort LAN address for same-wifi peers. Never assume it works across NAT."""
+    try:
+        import socket
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.2)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
+def get_nodes_with_local() -> list[dict[str, Any]]:
+    """Return all nodes, auto-updating the local node entry from hardware()."""
+    global _local_node_id
+    hw = hardware()
+    db = _db()
+
+    try:
+        nodes = db.get_nodes()
+    except Exception:
+        nodes = []
+
+    # Check if local node exists (unique machine id, never the shared key "local")
+    local_id = _machine_id()
+    host = platform.node() or "Local-PC"
+    local_node = next((n for n in nodes if n.get("id") == local_id), None)
+    if local_node is None:
+        local_node = next((n for n in nodes if n.get("name") == host), None)
+        if local_node and local_node.get("id"):
+            local_id = str(local_node["id"])
+            _local_node_id = local_id
+
+    gpu_name = "CPU"
+    vram_gb = 0.0
+    if hw.get("cuda_available") and hw.get("cuda_devices"):
+        dev = hw["cuda_devices"][0]
+        gpu_name = dev.get("name", "Unknown GPU")
+        vram_gb = dev.get("total_memory_gb", 0.0)
+    elif hw.get("mps_available"):
+        gpu_name = "Apple MPS"
+
+    now_ts = time.time()
+    from doof.runtime import capabilities_from_hardware
+    from doof.compute.pool import _settings as _compute_settings, current_job_count
+
+    consent = _compute_settings()
+    lan_url = os.environ.get("DOOF_LAN_URL") or f"http://{_guess_lan_ip()}:8765"
+    local_data: dict[str, Any] = {
+        "id": local_id,
+        "machine_id": local_id,
+        "name": host,
+        "gpu": gpu_name,
+        "vram_gb": vram_gb,
+        "device": hw.get("device", "cpu"),
+        "cuda_available": hw.get("cuda_available", False),
+        "platform": hw.get("platform", ""),
+        "torch_version": hw.get("torch_version"),
+        "status": "online",
+        "last_seen": now_ts,
+        "is_local": True,
+        "training_active": _train.get("running", False),
+        "capabilities": capabilities_from_hardware(hw),
+        "cpu_count": hw.get("cpu_count"),
+        "ram_gb": hw.get("ram_gb"),
+        "cpu_load": None,
+        "job_count": current_job_count(),
+        "max_jobs": consent.get("max_jobs", 1),
+        "accepting_jobs": bool(consent.get("accepting_jobs")),
+        "accept_cpu": bool(consent.get("accept_cpu", True)),
+        "accept_gpu": bool(consent.get("accept_gpu", True)),
+        "pause_on_battery": bool(consent.get("pause_on_battery", True)),
+        "pause_when_gaming": bool(consent.get("pause_when_gaming", True)),
+        "idle_only": bool(consent.get("idle_only", False)),
+        "lan_url": lan_url,
+        "reachable": True,
+    }
+
+    if local_node:
+        # Update last_seen for local node
+        try:
+            db.update_node(local_id, **local_data)
+        except Exception:
+            local_node.update(local_data)
+    else:
+        try:
+            db.upsert_node(local_data)
+        except Exception:
+            nodes.insert(0, local_data)
+    _local_node_id = local_id
+
+    # Mark stale nodes as offline (no heartbeat for 60s)
+    for node in nodes:
+        if node.get("id") == local_id:
+            continue
+        last = node.get("last_seen", 0)
+        if isinstance(last, (int, float)) and (now_ts - last) > _NODE_TIMEOUT:
+            node["status"] = "offline"
+            try:
+                db.update_node(node["id"], status="offline")
+            except Exception:
+                pass
+
+    # Re-fetch to get updated state
+    try:
+        nodes = db.get_nodes()
+        # Ensure local node is present with current data
+        for n in nodes:
+            if n.get("id") == local_id:
+                n.update(local_data)
+                break
+        else:
+            nodes.insert(0, local_data)
+    except Exception:
+        pass
+
+    return _dedupe_nodes(nodes)
+
+
+def _mark_local_node_training(training: bool) -> None:
+    """Update the local node's training_active flag."""
+    global _local_node_id
+    if _local_node_id:
+        db = _db()
+        try:
+            db.update_node(_local_node_id, training_active=training)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Training (preserved + enhanced)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_train_data() -> str:
+    """Build a training dataset from approved examples, return a text corpus path.
+
+    Calls ``build_dataset`` to assemble approved memories + feedback corrections
+    into a versioned JSONL, then flattens the ``response`` fields into plain
+    text for the PyTorch trainer (``load_data`` reads a single text blob).
+
+    Falls back to ``data/train.txt`` if no JSONL dataset is available so that
+    a fresh install with only the seed corpus still works.
+    """
+    try:
+        from doof.intelligence.dataset import build_dataset
+
+        ds = build_dataset()
+        jsonl_path = Path(ds.get("train_path", ""))
+        if jsonl_path.is_file():
+            lines: list[str] = []
+            for raw in jsonl_path.read_text(encoding="utf-8").splitlines():
+                if not raw.strip():
+                    continue
+                try:
+                    import json as _json
+
+                    obj = _json.loads(raw)
+                    resp = (obj.get("response") or "").strip()
+                    if resp:
+                        lines.append(resp)
+                except Exception:
+                    pass
+            if lines:
+                tmp = DATA_DIR / "_train_dataset.txt"
+                tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                # Only use the generated dataset if it has enough tokens
+                # for the configured seq_len (128). Otherwise fall back to
+                # the human-authored train.txt which is always large enough.
+                if len(tmp.read_text(encoding="utf-8")) > 128 * 4:
+                    return str(tmp)
+    except Exception:
+        pass
+    return str(TRAIN)
+
+
+def run_train(epochs: int = 3, resume_from: str | None = None) -> None:
+    global _train, _inf, _loaded
+    _stop.clear()
+    try:
+        import torch
+        import torch.nn.functional as F
+        from torch.amp import autocast
+        from tqdm import tqdm
+        from doof.training import DOOFTrainer, TrainingConfig
+
+        train_path = _resolve_train_data()
+        cfg = TrainingConfig(
+            data_path=train_path,
+            checkpoint_dir=str(CKPT_DIR),
+            epochs=epochs,
+            batch_size=8,
+            seq_len=64,
+            learning_rate=3e-4,
+            save_every=50,
+        )
+        tr = DOOFTrainer(cfg)
+        if resume_from:
+            path = (
+                Path(resume_from)
+                if Path(resume_from).is_absolute()
+                else ROOT / resume_from
+            )
+            if path.exists():
+                ck = torch.load(path, map_location=tr.device, weights_only=False)
+                tr.model.load_state_dict(ck["model_state_dict"])
+
+        tokens = tr.load_data()
+        step = 0
+        loss_val = 0.0
+
+        with _lock:
+            _train.update({"running": True, "message": "training", "history": []})
+        _mark_local_node_training(True)
+
+        total_steps = cfg.epochs * 100
+        t_start = time.time()
+        throttle_pct = 80  # refreshed from compute settings periodically
+        last_settings_read = 0.0
+        last_step_t = time.perf_counter()
+
+        for epoch in range(cfg.epochs):
+            if _stop.is_set():
+                break
+            for batch_i in tqdm(range(100), desc=f"Epoch {epoch+1}"):
+                if _stop.is_set():
+                    break
+                # Honor resource presets: duty-cycle steps so DOOF stays under
+                # max_cpu_pct even during training. Hard-capped at 95 by pool.
+                now = time.time()
+                if now - last_settings_read > 5.0:
+                    last_settings_read = now
+                    try:
+                        from doof.compute.pool import _settings
+
+                        throttle_pct = int(_settings().get("max_cpu_pct", 80))
+                    except Exception:
+                        throttle_pct = 80
+                if throttle_pct < 95:
+                    step_dt = time.perf_counter() - last_step_t
+                    pause = step_dt * (95 - throttle_pct) / max(1, throttle_pct)
+                    if pause > 0:
+                        time.sleep(min(pause, 2.0))
+                last_step_t = time.perf_counter()
+
+                tr.model.train()
+                x, y = tr.create_batches(tokens)
+                tr.optimizer.zero_grad(set_to_none=True)
+                with autocast(
+                    device_type=tr.device.type,
+                    dtype=torch.float16,
+                    enabled=tr.device.type == "cuda",
+                ):
+                    logits = tr.model(x)
+                    loss = F.cross_entropy(
+                        logits.reshape(-1, logits.size(-1)), y.reshape(-1)
+                    )
+                tr.scaler.scale(loss).backward()
+                tr.scaler.unscale_(tr.optimizer)
+                torch.nn.utils.clip_grad_norm_(tr.model.parameters(), 1.0)
+                tr.scaler.step(tr.optimizer)
+                tr.scaler.update()
+                step += 1
+                loss_val = float(loss.item())
+
+                elapsed = time.time() - t_start
+                speed = step / elapsed if elapsed > 0 else 0.0
+                remaining_steps = total_steps - step
+                eta = remaining_steps / speed if speed > 0 else None
+
+                with _lock:
+                    _train.update(
+                        {
+                            "step": step,
+                            "loss": loss_val,
+                            "epoch": epoch + 1,
+                            "message": f"epoch {epoch+1}/{cfg.epochs} · step {step}",
+                            "speed": round(speed, 2),
+                            "eta_seconds": round(eta) if eta else None,
+                        }
+                    )
+                    h = _train["history"]
+                    h.append({"step": step, "loss": loss_val})
+                    if len(h) > 500:
+                        _train["history"] = h[-500:]
+                if step % cfg.save_every == 0:
+                    try:
+                        tr.save_checkpoint(step, loss_val)
+                    except Exception:
+                        pass  # checkpoint metadata save is best-effort
+
+        try:
+            tr.save_checkpoint(step, loss_val)
+        except Exception:
+            pass  # checkpoint metadata save is best-effort
+        torch.save(
+            {
+                "model_state_dict": tr.model.state_dict(),
+                "step": step,
+                "loss": loss_val,
+                "model_config": {
+                    "vocab_size": tr.tokenizer.vocab_size,
+                    "max_seq_len": cfg.seq_len,
+                    "d_model": int(getattr(tr.model, "d_model", 256)),
+                    "n_heads": int(getattr(tr.model, "n_heads", 8)),
+                    "n_layers": int(getattr(tr.model, "n_layers", 6)),
+                },
+            },
+            CKPT_DIR / "doof_v01.pt",
+        )
+        tr.tokenizer.save_for_checkpoint(CKPT_DIR)
+
+        # Register brain version after training (as candidate, not production)
+        db = _db()
+        versions = _load_versions()
+        label = f"v{len(versions) + 1}.0.0-candidate"
+        try:
+            db.insert_version({
+                "checkpoint_name": "doof_v01.pt",
+                "label": label,
+                "status": "candidate",
+                "promoted_by": "local",
+            })
+        except Exception:
+            pass
+
+        with _lock:
+            _inf = None
+            _loaded = None
+            _train.update(
+                {
+                    "running": False,
+                    "message": "complete",
+                    "step": step,
+                    "speed": None,
+                    "eta_seconds": None,
+                }
+            )
+        _mark_local_node_training(False)
+    except Exception as e:
+        with _lock:
+            _train.update(
+                {
+                    "running": False,
+                    "message": f"error: {e}",
+                    "error": traceback.format_exc(),
+                }
+            )
+        _mark_local_node_training(False)
+
+
+# ---------------------------------------------------------------------------
+# Training stats helper
+# ---------------------------------------------------------------------------
+
+
+def training_stats() -> dict[str, Any]:
+    """Return enriched training status including job queue and worker pool."""
+    db = _db()
+
+    # Feedback stats
+    try:
+        feedback = db.get_feedback()
+    except Exception:
+        feedback = []
+    approved = [f for f in feedback if f.get("approved")]
+    training_ready = [f for f in feedback if f.get("training_ready")]
+
+    # Approved examples counts
+    try:
+        ex_counts = db.count_approved_examples()
+    except Exception:
+        ex_counts = {"total": 0, "approved": 0, "training_ready": 0}
+
+    # Memory stats
+    store = _get_store()
+    mem_stats = store.stats()
+
+    # Brain versions
+    versions = _load_versions()
+    production = next(
+        (v for v in reversed(versions) if v.get("status") == "production"), None
+    )
+
+    # Training jobs queue
+    try:
+        queued_jobs = db.get_training_jobs(status="queued")
+        running_jobs = db.get_training_jobs(status="running")
+    except Exception:
+        queued_jobs = []
+        running_jobs = []
+
+    # Online nodes / workers
+    try:
+        online_nodes = db.get_online_nodes()
+    except Exception:
+        online_nodes = []
+    workers_online = len(online_nodes)
+
+    with _lock:
+        state = dict(_train)
+
+    state["approved_examples"] = ex_counts.get("approved", len(approved))
+    state["training_ready_examples"] = ex_counts.get("training_ready", len(training_ready))
+    state["total_feedback"] = len(feedback)
+    state["memory_count"] = mem_stats["approved"]
+    state["brain_version"] = production.get("label") if production else "1.0.0"
+    state["production_checkpoint"] = production.get("checkpoint_name") if production else None
+    state["training_queue"] = [
+        {
+            "id": j.get("id"),
+            "type": j.get("type", "train"),
+            "priority": j.get("priority", 5),
+            "created_at": j.get("created_at"),
+            "payload": j.get("payload"),
+            "assigned_worker": j.get("worker"),
+        }
+        for j in queued_jobs
+    ]
+    state["running_jobs"] = [
+        {
+            "id": j.get("id"),
+            "step": j.get("step"),
+            "epoch": j.get("epoch"),
+            "total_epochs": j.get("total_epochs"),
+            "loss": j.get("loss"),
+            "worker": j.get("worker"),
+        }
+        for j in running_jobs
+    ]
+    state["workers_online"] = workers_online
+    state["examples_count"] = ex_counts.get("total", len(approved))
+    state["online_nodes"] = [
+        {
+            "id": n.get("id"),
+            "name": n.get("name"),
+            "gpu": n.get("gpu"),
+            "vram_gb": n.get("vram_gb"),
+            "status": n.get("status", "online"),
+            "is_local": n.get("is_local", False),
+            "training_active": n.get("training_active", False),
+        }
+        for n in online_nodes
+    ]
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Training jobs (distributed compute queue)
+# ---------------------------------------------------------------------------
+
+
+def get_training_jobs_api(*, status: str | None = None, limit: int = 50) -> list[dict]:
+    db = _db()
+    try:
+        return db.get_training_jobs(status=status, limit=limit)
+    except Exception:
+        return []
+
+
+def create_training_job(
+    body: dict[str, Any], created_by: str = "local"
+) -> dict[str, Any]:
+    """Create a training job and assign it to the strongest online worker."""
+    from doof.intelligence.scheduler import assign_training_job
+
+    payload = {
+        "epochs": int(body.get("epochs", 3)),
+        "seq_len": int(body.get("seq_len", 64)),
+        "batch_size": int(body.get("batch_size", 8)),
+        "learning_rate": float(body.get("learning_rate", 3e-4)),
+        "resume_from": body.get("resume_from"),
+        "dataset_version": body.get("dataset_version"),
+    }
+    priority = int(body.get("priority", 5))
+    return assign_training_job(payload=payload, priority=priority,
+                               created_by=created_by)
+
+
+def cancel_training_job(job_id: str) -> bool:
+    db = _db()
+    try:
+        return bool(db.update_training_job(job_id, status="cancelled"))
+    except Exception:
+        return False
+
+
+def retry_training_job(job_id: str) -> dict[str, Any] | None:
+    db = _db()
+    try:
+        return db.update_training_job(job_id, status="queued", error=None)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Approved examples API
+# ---------------------------------------------------------------------------
+
+
+def get_approved_examples_api(
+    *, approved_only: bool = True, limit: int = 500
+) -> list[dict]:
+    db = _db()
+    try:
+        return db.get_approved_examples(
+            approved_only=approved_only, training_ready_only=False, limit=limit
+        )
+    except Exception:
+        return []
+
+
+def add_approved_example(body: dict[str, Any]) -> dict[str, Any]:
+    db = _db()
+    record = {
+        "prompt": (body.get("prompt") or "").strip(),
+        "response": (body.get("response") or "").strip(),
+        "rating": body.get("rating", "good"),
+        "correction": body.get("correction", ""),
+        "quality": body.get("quality"),
+        "training_ready": body.get("training_ready", True),
+        "approved": body.get("approved", True),
+        "created_by": body.get("created_by", "local"),
+        "source": body.get("source", "manual"),
+        "memory_ids": body.get("memory_ids") or [],
+    }
+    if not record["prompt"] or not record["response"]:
+        raise ValueError("prompt and response required")
+    try:
+        return db.insert_approved_example(record)
+    except Exception:
+        # Local fallback
+        examples_path = DATA_DIR / "approved_examples.json"
+        examples = []
+        if examples_path.exists():
+            try:
+                examples = json.loads(examples_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        record.setdefault("id", str(uuid.uuid4()))
+        record.setdefault("created_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        record.setdefault("approved_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        record.setdefault("approved_by", record["created_by"])
+        examples.append(record)
+        examples_path.write_text(
+            json.dumps(examples, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return record
+
+
+def delete_approved_example_api(example_id: str) -> bool:
+    db = _db()
+    try:
+        return db.delete_approved_example(example_id)
+    except Exception:
+        return False
+
+
+def update_approved_example_api(example_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
+    """Update an approved training example.
+
+    Only a narrow allow-list of fields can change, so callers (and honest UI
+    buttons) can never reshape arbitrary stored data.  Approve / reject is done
+    by setting ``approved``; ``training_ready`` records whether the human has
+    signed off for it to enter the dataset.  AI-assisted or imported examples
+    must arrive with ``approved=False`` and only become trainable via explicit
+    human approval here.
+    """
+    allowed = {
+        "prompt", "response", "correction", "rating", "quality",
+        "approved", "training_ready", "source", "authored", "created_by",
+    }
+    fields = {k: body[k] for k in allowed if k in body}
+    if not fields:
+        return None
+
+    db = _db()
+    # Prefer a database adapter that supports in-place updates (cloud-ready).
+    try:
+        if hasattr(db, "update_approved_example") and callable(getattr(db, "update_approved_example")):
+            return db.update_approved_example(example_id, **fields)
+    except Exception:
+        pass
+
+    # Local fallback — same approved_examples.json source as add_approved_example.
+    examples_path = DATA_DIR / "approved_examples.json"
+    examples: list[dict[str, Any]] = []
+    if examples_path.exists():
+        try:
+            loaded = json.loads(examples_path.read_text(encoding="utf-8"))
+            examples = loaded if isinstance(loaded, list) else []
+        except Exception:
+            examples = []
+    hit = next((e for e in examples if e.get("id") == example_id), None)
+    if hit is None:
+        return None
+    hit.update(fields)
+    try:
+        examples_path.write_text(
+            json.dumps(examples, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        return None
+    return dict(hit)
+
+
+# ---------------------------------------------------------------------------
+# Request handler
+# ---------------------------------------------------------------------------
+
+
+_boot: dict[str, Any] = {
+    "phase": "runtime",
+    "ready": False,
+    "failed": False,
+    "message": "Warming up the shawarma machine\u2026",
+}
+
+
+def boot_state() -> dict[str, Any]:
+    from doof.personality import boot_copy
+
+    label, detail = boot_copy(_boot.get("phase") or "runtime")
+    return {
+        **_boot,
+        "label": label,
+        "detail": detail,
+    }
+
+
+def status_snapshot() -> dict[str, Any]:
+    """Honest combined status for the Status tab. Never fakes compute."""
+    from doof.personality import pick, health_kind, node_nickname
+    from doof.runtime import torch_available, torch_error, is_low_end
+    from doof.compute.pool import _settings as cs, current_job_count
+    from doof.compute.scheduler import node_state, is_stale
+    from doof.cloud import cloud_status
+
+    hw = hardware()
+    nodes = get_nodes_with_local()
+    online_nodes = [n for n in nodes if n.get("status") == "online" and not is_stale(n)]
+    consent = cs()
+    cloud = cloud_status()
+    sb = _supabase_cfg()
+    mode = "connected" if sb and cloud.get("connected") else ("local" if not sb else "degraded")
+    if not sb:
+        mode = "local"
+    elif cloud.get("connected"):
+        mode = "connected"
+    else:
+        mode = "offline"
+
+    problems: list[dict[str, Any]] = []
+    if not torch_available():
+        problems.append({
+            "title": "The local brain failed to start.",
+            "body": "DOOF switched to its backup brain.",
+            "technical": torch_error(),
+            "kind": "ai_down",
+        })
+    if sb and not cloud.get("connected"):
+        problems.append({
+            "title": pick("cloud_offline")[0],
+            "body": str(cloud.get("message") or "Cloud unreachable"),
+            "technical": cloud.get("message"),
+            "kind": "cloud_offline",
+        })
+
+    kind = health_kind(
+        online=True,
+        degraded=bool(problems),
+        busy=_train.get("running") or current_job_count() > 0,
+    )
+    label, detail = pick(kind)
+    accepting = [n for n in online_nodes if n.get("accepting_jobs")]
+    pool_label, pool_detail = pick("network" if accepting else "network_empty")
+
+    decorated = []
+    for n in nodes:
+        st = node_state(n)
+        decorated.append({
+            **n,
+            "state": st,
+            "nickname": node_nickname(str(n.get("name") or "node"), n.get("gpu"), bool(n.get("is_local"))),
+            "stale": is_stale(n),
+        })
+
+    auth = auth_config()
+    return {
+        "ok": True,
+        "version": DOOF_VERSION,
+        "mode": mode,
+        "health": {"kind": kind, "label": label, "detail": detail},
+        "brain": {
+            "torch_available": torch_available(),
+            "torch_error": torch_error(),
+            "loaded": _inf is not None,
+            "provider": "local_model" if _inf is not None else "memory",
+            "cloud_fallback": bool(os.environ.get("DOOF_HOSTED_BRAIN_URL")),
+            "low_end": is_low_end(),
+            "device": hw.get("device"),
+            "torch_version": hw.get("torch_version"),
+            "cuda_available": hw.get("cuda_available", False),
+            "label": pick("ai" if torch_available() else "ai_fallback")[0],
+            "detail": pick("ai" if torch_available() else "ai_fallback")[1],
+            **(_probe_checkpoint() or {}),
+        },
+        "database": {
+            "local": True,
+            "supabase_configured": bool(sb),
+            "supabase_connected": bool(cloud.get("connected")),
+            "mode": mode,
+            "label": pick("cloud_connected" if mode == "connected" else "cloud_offline")[0],
+            "detail": pick("cloud_connected" if mode == "connected" else "cloud_offline")[1],
+            "supabase_error": (cloud.get("message") or None) if (sb and not cloud.get("connected")) else None,
+        },
+        "network": {
+            "nodes": decorated,
+            "online": len(online_nodes),
+            "accepting": len(accepting),
+            "label": pool_label,
+            "detail": pool_detail,
+            "honest": "Job-level compute sharing. One job runs on one node. Models are not split across PCs.",
+        },
+        "compute": {
+            "contribute": consent,
+            "job_count": current_job_count(),
+            "local_id": _machine_id(),
+        },
+        "hardware": hw,
+        "music": {
+            "label": pick("music")[0],
+            "detail": pick("music")[1],
+        },
+        "auth": {
+            "provider": auth.get("provider"),
+            "google": auth.get("google"),
+            "email_verification": auth.get("email_verification"),
+        },
+        "problems": problems,
+        "training_running": bool(_train.get("running")),
+    }
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt: str, *args: Any) -> None:
+        _log.info("[api:%s] %s", getattr(self, "_req_id", "?"), args[0])
+
+    def _start_request(self) -> str:
+        rid = _request_id()
+        self._req_id = rid
+        return rid
+
+    def do_OPTIONS(self) -> None:
+        self._start_request()
+        self.send_response(204)
+        _cors(self)
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        rid = self._start_request()
+        path = urlparse(self.path).path
+        _log.info("[api:%s] GET %s", rid, path)
+        try:
+            # Version
+            if path == "/api/version":
+                _json(self, 200, {
+                    "version": DOOF_VERSION,
+                    "protocol": DOOF_PROTOCOL,
+                    "name": "DOOF",
+                })
+
+            # Readiness
+            elif path == "/api/readiness":
+                ready = _boot.get("ready", False)
+                _json(self, 200 if ready else 503, {
+                    "ready": ready,
+                    "phase": _boot.get("phase", "unknown"),
+                })
+
+            # Health
+            elif path in ("/", "/api/health"):
+                from doof.personality import pick
+                from doof.runtime import torch_available, is_low_end
+
+                label, detail = pick("healthy" if True else "offline")
+                _json(self, 200, {
+                    "ok": True,
+                    "service": "doof",
+                    "version": DOOF_VERSION,
+                    "label": label,
+                    "detail": detail,
+                    "torch": torch_available(),
+                    "low_end": is_low_end(),
+                    "mode": "connected" if _supabase_cfg() else "local",
+                })
+
+            # Hardware
+            elif path == "/api/hardware":
+                _json(self, 200, hardware())
+
+            # Model
+            elif path == "/api/model":
+                _json(self, 200, model_info())
+
+            # Checkpoints (legacy)
+            elif path == "/api/checkpoints":
+                _json(self, 200, {"checkpoints": list_ckpts()})
+
+            # Model versions
+            elif path == "/api/models/versions":
+                _json(self, 200, {"checkpoints": list_ckpts(), "versions": _load_versions()})
+
+            # Model manifest — shared model distribution
+            elif path == "/api/models/manifest":
+                _json(self, 200, _model_manifest())
+
+            # Training status (enriched)
+            elif path == "/api/training":
+                _json(self, 200, training_stats())
+
+            # Training jobs queue
+            elif path == "/api/training/jobs":
+                _json(self, 200, {"jobs": get_training_jobs_api()})
+
+            # Approved examples
+            elif path == "/api/approved_examples":
+                approved_only = urlparse(self.path).query.lower() != "approved=false"
+                _json(self, 200, {"examples": get_approved_examples_api(approved_only=approved_only)})
+
+            # Approved examples count
+            elif path == "/api/approved_examples/count":
+                db = _db()
+                try:
+                    counts = db.count_approved_examples()
+                except Exception:
+                    counts = {"total": 0, "approved": 0, "training_ready": 0}
+                _json(self, 200, counts)
+
+            # Network summary (connected users / GPU / VRAM / status)
+            elif path == "/api/network":
+                nodes = get_nodes_with_local()
+                online = [n for n in nodes if n.get("status") == "online"]
+                total_vram = sum(n.get("vram_gb", 0) or 0 for n in online)
+                connected_users = sum(1 for n in online if not n.get("is_local")) + 1
+                _json(
+                    self,
+                    200,
+                    {
+                        "nodes": nodes,
+                        "nodes_online": len(online),
+                        "connected_users": connected_users,
+                        "total_vram_gb": round(total_vram, 1),
+                        "training_active": any(n.get("training_active") for n in online),
+                        "workers_online": len(online),
+                    },
+                )
+
+            # Brain Network status (Tailscale + nodes)
+            elif path == "/api/brain_network":
+                try:
+                    from doof.networking.tailscale import detect_tailscale
+                    ts = detect_tailscale()
+                except Exception:
+                    ts = {"installed": False, "running": False, "ip": None, "hostname": None, "status": "Unavailable", "version": None}
+                nodes = get_nodes_with_local()
+                online = [n for n in nodes if n.get("status") == "online"]
+                remote = [n for n in online if not n.get("is_local")]
+                try:
+                    from doof.compute.pool import _settings as _pool_settings
+                    pool_cfg = _pool_settings()
+                except Exception:
+                    pool_cfg = {"accepting_jobs": True, "allow_train": True, "allow_inference": True}
+                _json(
+                    self,
+                    200,
+                    {
+                        "tailscale": ts,
+                        "nodes_total": len(nodes),
+                        "nodes_online": len(online),
+                        "nodes_remote": len(remote),
+                        "mode": _settings.get("network_mode", "local"),
+                        "compute_pool": pool_cfg,
+                    },
+                )
+
+            # Settings
+            elif path == "/api/settings":
+                with _lock:
+                    _json(self, 200, dict(_settings))
+
+            # Cloud
+            elif path == "/api/cloud":
+                from doof.cloud import cloud_status
+                _json(self, 200, cloud_status())
+
+            # Knowledge (legacy)
+            elif path == "/api/knowledge":
+                items = knowledge_items()
+                _json(
+                    self,
+                    200,
+                    {
+                        "items": items,
+                        "text": "\n".join(
+                            i["text"] for i in items if i.get("approved")
+                        ),
+                    },
+                )
+
+            # Memory
+            elif path == "/api/memory":
+                store = _get_store()
+                _json(
+                    self,
+                    200,
+                    {
+                        "memories": store.list_all(),
+                        "stats": store.stats(),
+                    },
+                )
+
+            # Memory search
+            elif path.startswith("/api/memory/search"):
+                from urllib.parse import parse_qs
+                qs = parse_qs(urlparse(self.path).query)
+                q = (qs.get("q", [""])[0]).strip()
+                limit = int((qs.get("limit", ["20"])[0]))
+                store = _get_store()
+                results = store.search(q, limit=limit) if q else store.list_all()
+                _json(self, 200, {"memories": results, "total": len(results)})
+
+            # Feedback
+            elif path == "/api/feedback":
+                items = _load_feedback()
+                training_ready = [f for f in items if f.get("training_ready")]
+                _json(
+                    self,
+                    200,
+                    {
+                        "items": items,
+                        "total": len(items),
+                        "approved": sum(1 for f in items if f.get("approved")),
+                        "training_ready": len(training_ready),
+                    },
+                )
+
+            # Nodes
+            elif path == "/api/nodes":
+                nodes = get_nodes_with_local()
+                total_vram = sum(n.get("vram_gb", 0) or 0 for n in nodes if n.get("status") == "online")
+                online = [n for n in nodes if n.get("status") == "online"]
+                _json(
+                    self,
+                    200,
+                    {
+                        "nodes": nodes,
+                        "nodes_online": len(online),
+                        "connected_users": len(online),
+                        "total_vram_gb": round(total_vram, 1),
+                        "training_active": any(n.get("training_active") for n in online),
+                    },
+                )
+
+            # Current session profile
+            elif path == "/api/me":
+                _json(self, 200, {"profile": _profile_from_token(_bearer_token(self))})
+
+            # Auth capabilities (which login options to show)
+            elif path == "/api/auth/config":
+                _json(self, 200, auth_config())
+
+            elif path == "/api/status":
+                _json(self, 200, status_snapshot())
+
+            elif path == "/api/compute/settings":
+                from doof.compute.pool import _settings as cs
+                _json(self, 200, cs())
+
+            elif path == "/api/boot":
+                _json(self, 200, boot_state())
+
+            # Scheduler
+            elif path == "/api/scheduler":
+                from doof.intelligence.scheduler import get_scheduler
+                _json(self, 200, get_scheduler().status())
+
+            else:
+                _json(self, 404, {"error": "not found"})
+
+        except Exception as e:
+            _json_err(self, e, 500)
+
+    def do_POST(self) -> None:
+        global _inf, _loaded
+        rid = self._start_request()
+        path = urlparse(self.path).path
+        body = _body(self)
+        _log.info("[api:%s] POST %s", rid, path)
+        try:
+            # Generate
+            if path == "/api/generate":
+                prompt = (body.get("prompt") or "").strip()
+                if not prompt:
+                    _json(self, 400, {"error": "Say something first.", "title": "Empty message"})
+                    return
+
+                with _lock:
+                    temp = float(body.get("temperature", _settings["temperature"]))
+                    mx = int(body.get("max_new_tokens", _settings["max_new_tokens"]))
+                    tk = int(body.get("top_k", _settings.get("top_k", 50)))
+
+                t0 = time.time()
+                try:
+                    from doof.inference.router import route_inference
+
+                    nodes = get_nodes_with_local()
+                    result = route_inference(
+                        prompt,
+                        temperature=temp,
+                        max_new_tokens=mx,
+                        top_k=tk,
+                        nodes=nodes,
+                        local_id=_machine_id(),
+                        token=_bearer_token(self),
+                    )
+                    response = result.as_dict()
+                    response["prompt"] = prompt
+                    _log.info(
+                        "[api:%s] generate provider=%s latency=%sms",
+                        rid, response.get("provider"), response.get("elapsed_ms"),
+                    )
+                    _json(self, 200, response)
+                except Exception as e:
+                    from doof.errors import public_error
+
+                    err = public_error(e, fallback_used="memory")
+                    _log.error("[api:%s] generate failed: %s", rid, err.get("technical"))
+                    _json(self, 200, {
+                        "text": err["body"],
+                        "prompt": prompt,
+                        "provider": "none",
+                        "notice": err,
+                        "elapsed_ms": int((time.time() - t0) * 1000),
+                        "memories_used": [],
+                    })
+
+            # Auth
+            elif path == "/api/auth/signup":
+                code, payload = auth_signup(body)
+                _json(self, code, payload)
+
+            elif path == "/api/auth/login":
+                code, payload = auth_login(body)
+                _json(self, code, payload)
+
+            elif path == "/api/auth/resend":
+                code, payload = auth_resend((body.get("email") or "").strip().lower())
+                _json(self, code, payload)
+
+            elif path == "/api/auth/verify":
+                token = (body.get("token") or body.get("token_hash") or body.get("access_token") or "").strip()
+                code, payload = auth_verify(token, token_type=(body.get("type") or "signup"))
+                _json(self, code, payload)
+
+            elif path == "/api/auth/oauth":
+                code, payload = auth_oauth(body.get("access_token") or "")
+                _json(self, code, payload)
+
+            elif path == "/api/auth/logout":
+                token = _bearer_token(self)
+                if token and SESSIONS_PATH.exists():
+                    try:
+                        sessions = json.loads(SESSIONS_PATH.read_text(encoding="utf-8"))
+                        sessions = [s for s in sessions if s.get("token") != token]
+                        SESSIONS_PATH.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
+                    except Exception:
+                        pass
+                _json(self, 200, {"ok": True})
+
+            # Training start
+            elif path == "/api/training/start":
+                with _lock:
+                    if _train["running"]:
+                        _json(self, 409, {"error": "already running"})
+                        return
+                    _train["running"] = True
+                    _train["message"] = "starting"
+                threading.Thread(
+                    target=run_train,
+                    kwargs={
+                        "epochs": int(body.get("epochs", 3)),
+                        "resume_from": body.get("resume_from"),
+                    },
+                    daemon=True,
+                ).start()
+                _json(self, 200, {"ok": True})
+
+            # Training stop
+            elif path == "/api/training/stop":
+                _stop.set()
+                _json(self, 200, {"ok": True})
+
+            # Build dataset
+            elif path == "/api/training/build_dataset":
+                from doof.intelligence.dataset import build_dataset
+                result = build_dataset(
+                    version=body.get("version"),
+                    min_quality=float(body.get("min_quality", 55.0)),
+                )
+                with _lock:
+                    _train["dataset_version"] = result.get("version")
+                _json(self, 200, result)
+
+            # Create training job (distributed)
+            elif path == "/api/training/jobs":
+                job = create_training_job(body)
+                _json(self, 201, {"ok": True, "job": job})
+
+            # Cancel training job
+            elif re.match(r"^/api/training/jobs/[^/]+/cancel$", path):
+                job_id = path.split("/")[4]
+                ok = cancel_training_job(job_id)
+                _json(self, 200, {"ok": ok, "cancelled": job_id})
+
+            # Retry training job
+            elif re.match(r"^/api/training/jobs/[^/]+/retry$", path):
+                job_id = path.split("/")[4]
+                result = retry_training_job(job_id)
+                if result:
+                    _json(self, 200, {"ok": True, "job": result})
+                else:
+                    _json(self, 404, {"error": "job not found"})
+
+            # Clear training data (admin)
+            elif path == "/api/admin/training/clear":
+                store = _get_store()
+                store.clear()
+                _json(self, 200, {"ok": True, "cleared": True})
+
+            # Knowledge (legacy)
+            elif path == "/api/knowledge":
+                if "items" in body:
+                    save_knowledge(body["items"])
+                    _json(self, 200, {"ok": True, "count": len(body["items"])})
+                elif "text" in body:
+                    lines = [l.strip() for l in body["text"].splitlines() if l.strip()]
+                    items = [
+                        {"id": f"k-{i}", "text": l, "approved": True, "source": "edit"}
+                        for i, l in enumerate(lines)
+                    ]
+                    save_knowledge(items)
+                    _json(self, 200, {"ok": True, "count": len(items)})
+                else:
+                    _json(self, 400, {"error": "items or text required"})
+
+            # Memory — add
+            elif path == "/api/memory":
+                content = (body.get("content") or body.get("text") or "").strip()
+                if not content:
+                    _json(self, 400, {"error": "content required"})
+                    return
+                store = _get_store()
+                item = store.add(
+                    content,
+                    created_by=body.get("created_by", "local"),
+                    importance=body.get("importance", "medium"),
+                    category=body.get("category", "general"),
+                    tags=body.get("tags") or [],
+                    approved=body.get("approved", True),
+                )
+                _json(self, 201, {"ok": True, "memory": item})
+
+            # Memory approve
+            elif re.match(r"^/api/memory/[^/]+/approve$", path):
+                mem_id = path.split("/")[3]
+                store = _get_store()
+                updated = store.update(mem_id, approved=body.get("approved", True))
+                if updated:
+                    _json(self, 200, {"ok": True, "memory": updated})
+                else:
+                    _json(self, 404, {"error": "memory not found"})
+
+            # Memory promote -> training example
+            elif re.match(r"^/api/memory/[^/]+/promote$", path):
+                mem_id = path.split("/")[3]
+                store = _get_store()
+                mem = store.get(mem_id)
+                if not mem:
+                    _json(self, 404, {"error": "memory not found"})
+                    return
+                content = (mem.get("content") or "").strip()
+                if not content:
+                    _json(self, 400, {"error": "memory has no content"})
+                    return
+                if mem.get("training_status") == "promoted":
+                    _json(self, 200, {"ok": True, "already": True, "memory": mem})
+                    return
+                example = add_approved_example({
+                    "prompt": body.get("prompt") or f"Remember this: {content[:120]}",
+                    "response": content,
+                    "source": "memory",
+                    "approved": True,
+                    "training_ready": True,
+                    "created_by": body.get("created_by", "local"),
+                    "memory_ids": [mem_id],
+                })
+                updated = store.update(mem_id, training_status="promoted", training_example_id=example.get("id"))
+                _json(self, 201, {"ok": True, "example": example, "memory": updated or mem})
+
+            # Feedback
+            elif path == "/api/feedback":
+                prompt = (body.get("prompt") or "").strip()
+                response = (body.get("response") or "").strip()
+                rating = (body.get("rating") or "").strip()
+                if not prompt or not response or rating not in ("good", "bad"):
+                    _json(self, 400, {"error": "prompt, response, and rating (good|bad) required"})
+                    return
+                item = add_feedback(
+                    prompt=prompt,
+                    response=response,
+                    rating=rating,
+                    correction=body.get("correction", ""),
+                    created_by=body.get("created_by", "local"),
+                    memories_used=body.get("memories_used"),
+                )
+                _json(self, 201, {"ok": True, "feedback": item})
+
+            # Approve feedback -> move to approved_examples
+            elif re.match(r"^/api/feedback/[^/]+/approve$", path):
+                fb_id = path.split("/")[3]
+                result = approve_feedback(fb_id, approved_by=body.get("approved_by", "local"))
+                if result:
+                    _json(self, 200, {"ok": True, "example": result})
+                else:
+                    _json(self, 404, {"error": "feedback not found"})
+
+            # Node register — always the persistent machine id, never "local"
+            elif path == "/api/nodes/register":
+                db = _db()
+                mid = _machine_id()
+                hw = hardware()
+                name = (body.get("name") or platform.node() or "Unknown").strip()
+                now_ts = time.time()
+                node_data: dict[str, Any] = {
+                    "id": mid,
+                    "machine_id": mid,
+                    "name": name,
+                    "gpu": body.get("gpu") or hw.get("cuda_devices", [{}])[0].get("name") if hw.get("cuda_devices") else body.get("gpu", "CPU"),
+                    "vram_gb": float(body.get("vram_gb") or 0),
+                    "device": body.get("device") or hw.get("device") or "cpu",
+                    "cuda_available": body.get("cuda_available", hw.get("cuda_available", False)),
+                    "platform": body.get("platform") or hw.get("platform") or platform.system(),
+                    "torch_version": body.get("torch_version") or hw.get("torch_version"),
+                    "status": "online",
+                    "last_seen": now_ts,
+                    "is_local": True,
+                    "training_active": body.get("training_active", False),
+                }
+                try:
+                    saved = db.upsert_node(node_data)
+                    saved.setdefault("id", mid)
+                except Exception:
+                    saved = node_data
+                global _local_node_id
+                _local_node_id = mid
+                _json(self, 201, {"ok": True, "node": saved})
+
+            # Node heartbeat
+            elif path == "/api/nodes/heartbeat":
+                node_id = body.get("id")
+                db = _db()
+                # Find node by id or name
+                nodes = _load_nodes()
+                node = next((n for n in nodes if n.get("id") == node_id), None)
+                if node is None and node_id:
+                    # Try matching by name
+                    node = next((n for n in nodes if n.get("name") == node_id), None)
+                if node:
+                    update_fields = {
+                        "last_seen": time.time(),
+                        "status": "online",
+                        "training_active": body.get("training_active", False),
+                    }
+                    if body.get("gpu"):
+                        update_fields["gpu"] = body["gpu"]
+                    if body.get("vram_gb") is not None:
+                        update_fields["vram_gb"] = float(body["vram_gb"])
+                    try:
+                        db.update_node(node["id"], **update_fields)
+                    except Exception:
+                        node.update(update_fields)
+                        _save_nodes(nodes)
+                    _json(self, 200, {"ok": True})
+                else:
+                    _json(self, 404, {"error": "node not found"})
+
+            # Model promote
+            elif path == "/api/models/promote":
+                ckpt_name = body.get("checkpoint_name") or body.get("name")
+                label = body.get("label") or ckpt_name
+                if not ckpt_name:
+                    _json(self, 400, {"error": "checkpoint_name required"})
+                    return
+                result = promote_checkpoint(
+                    ckpt_name, label, promoted_by=body.get("promoted_by", "local")
+                )
+                _json(self, 200, result)
+
+            # Promote with evaluation gate
+            elif path == "/api/models/promote_with_eval":
+                ckpt_name = body.get("checkpoint_name") or body.get("name")
+                if not ckpt_name:
+                    _json(self, 400, {"error": "checkpoint_name required"})
+                    return
+                # Evaluate first
+                from doof.intelligence.evaluate import evaluate_checkpoint
+                eval_result = evaluate_checkpoint(ckpt_name)
+                db = _db()
+                # Find or create the version record
+                versions = _load_versions()
+                vinfo = next((v for v in versions if v.get("checkpoint_name") == ckpt_name), None)
+                if vinfo:
+                    db.update_version(
+                        vinfo["id"],
+                        eval_result=eval_result,
+                        eval_passed=eval_result.get("status") == "ok",
+                        perplexity=eval_result.get("perplexity"),
+                        evaluated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    )
+                # Only promote if evaluation passes
+                if eval_result.get("status") == "ok" and eval_result.get("perplexity") is not None:
+                    result = promote_checkpoint(
+                        ckpt_name,
+                        body.get("label") or ckpt_name,
+                        promoted_by=body.get("promoted_by", "local"),
+                    )
+                    _json(self, 200, {"ok": True, "promoted": result, "evaluation": eval_result})
+                else:
+                    _json(self, 200, {
+                        "ok": False,
+                        "reason": "evaluation_failed",
+                        "evaluation": eval_result,
+                    })
+
+            # Model sync — download a remote checkpoint
+            elif path == "/api/models/sync":
+                model_id = (body.get("model_id") or "doof-base").strip()
+                version = (body.get("version") or "").strip()
+                url = (body.get("download_url") or body.get("url") or "").strip()
+                sha = (body.get("sha256") or "").strip()
+                auto = bool(body.get("auto_apply"))
+                if not version or not url:
+                    _json(self, 400, {"error": "version and download_url required"})
+                    return
+                try:
+                    from doof.models.manager import sync_model_from_remote
+                    model = sync_model_from_remote(
+                        model_id, version, url, sha, auto_apply=auto
+                    )
+                    _json(self, 200, {"ok": True, "model": model.as_dict()})
+                except Exception as e:
+                    _json(self, 400, {"error": str(e)})
+
+            # Model rollback
+            elif path == "/api/models/rollback":
+                model_id = (body.get("model_id") or "doof-base").strip()
+                target = body.get("version")
+                try:
+                    from doof.models.manager import rollback_model
+                    model = rollback_model(model_id, target)
+                    global _inf, _loaded
+                    with _lock:
+                        _inf = None
+                        _loaded = None
+                    _json(self, 200, {"ok": True, "model": model.as_dict()})
+                except Exception as e:
+                    _json(self, 400, {"error": str(e)})
+
+            # Save brain network pool settings
+            elif path == "/api/brain_network/pool":
+                try:
+                    from doof.compute.pool import save_settings as _pool_save
+                    result = _pool_save(body)
+                    _json(self, 200, {"ok": True, "compute_pool": result})
+                except Exception as e:
+                    _json(self, 400, {"error": str(e)})
+
+            # Add approved example
+            elif path == "/api/approved_examples":
+                try:
+                    record = add_approved_example(body)
+                    _json(self, 201, {"ok": True, "example": record})
+                except ValueError as e:
+                    _json(self, 400, {"error": str(e)})
+
+            # Model load
+            elif path == "/api/model/load":
+                with _lock:
+                    _inf = None
+                    _loaded = None
+                try:
+                    get_inf(body.get("checkpoint") or body.get("path"))
+                    _json(self, 200, {"ok": True, "checkpoint": _loaded})
+                except Exception as e:
+                    _json(self, 400, {"error": str(e)})
+
+            # Reload
+            elif path == "/api/reload":
+                with _lock:
+                    _inf = None
+                    _loaded = None
+                _json(self, 200, {"ok": True})
+
+            # Settings
+            elif path == "/api/settings":
+                with _lock:
+                    for k in ("temperature", "max_new_tokens", "top_k", "context_length"):
+                        if k in body:
+                            _settings[k] = (
+                                float(body[k]) if k == "temperature" else int(body[k])
+                            )
+                    if "network_mode" in body:
+                        mode = str(body["network_mode"] or "local").strip()
+                        if mode in ("local", "tailscale", "cloud"):
+                            _settings["network_mode"] = mode
+                    SETT.parent.mkdir(parents=True, exist_ok=True)
+                    SETT.write_text(json.dumps(_settings, indent=2, ensure_ascii=False), encoding="utf-8")
+                    _json(self, 200, dict(_settings))
+
+            elif path == "/api/compute/settings":
+                from doof.compute.pool import save_settings
+                saved = save_settings(body)
+                try:
+                    get_nodes_with_local()
+                except Exception:
+                    pass
+                _json(self, 200, {"ok": True, "settings": saved})
+
+            elif path == "/api/compute/execute":
+                if not _profile_from_token(_bearer_token(self)):
+                    if self.client_address[0] not in ("127.0.0.1", "::1"):
+                        _json(self, 401, {"error": "Sign in to send work to this grill."})
+                        return
+                job_type = (body.get("type") or "inference").strip()
+                try:
+                    from doof.compute.pool import execute_local
+                    result = execute_local(job_type, body.get("payload") or body)
+                    _json(self, 200, result)
+                except Exception as e:
+                    _json_err(self, e, 400)
+
+            elif path == "/api/compute/jobs":
+                from doof.compute.jobs import validate_payload
+                job_type = (body.get("type") or "inference").strip()
+                try:
+                    payload = validate_payload(job_type, body.get("payload") or body)
+                except Exception as e:
+                    _json_err(self, e, 400)
+                    return
+                if job_type == "inference":
+                    from doof.inference.router import route_inference
+                    nodes = get_nodes_with_local()
+                    result = route_inference(
+                        payload["prompt"],
+                        temperature=payload.get("temperature", 0.7),
+                        max_new_tokens=payload.get("max_new_tokens", 80),
+                        top_k=payload.get("top_k", 50),
+                        nodes=nodes,
+                        local_id=_machine_id(),
+                        token=_bearer_token(self),
+                    )
+                    _json(self, 200, result.as_dict())
+                else:
+                    from doof.compute.pool import execute_local
+                    _json(self, 200, execute_local(job_type, payload))
+
+            elif path == "/api/compute/rewards":
+                from doof.rewards import balances, payouts_status
+                profile = _profile_from_token(_bearer_token(self))
+                uid = profile.get("id") if profile else _machine_id()
+                bal = balances(uid)
+                payouts = payouts_status()
+                _json(self, 200, {**bal, "payouts": payouts})
+
+            else:
+                _json(self, 404, {"error": "not found"})
+
+        except Exception as e:
+            _json_err(self, e, 500)
+
+    def do_DELETE(self) -> None:
+        rid = self._start_request()
+        path = urlparse(self.path).path
+        _log.info("[api:%s] DELETE %s", rid, path)
+        try:
+            # DELETE /api/memory/{id}
+            m = re.match(r"^/api/memory/([^/]+)$", path)
+            if m:
+                mem_id = m.group(1)
+                store = _get_store()
+                if store.delete(mem_id):
+                    _json(self, 200, {"ok": True, "deleted": mem_id})
+                else:
+                    _json(self, 404, {"error": "memory not found"})
+                return
+
+            # DELETE /api/nodes/{id}
+            m = re.match(r"^/api/nodes/([^/]+)$", path)
+            if m:
+                node_id = m.group(1)
+                db = _db()
+                try:
+                    ok = db.delete_node(node_id)
+                except Exception:
+                    ok = False
+                if not ok:
+                    # Try local fallback
+                    nodes = _load_nodes()
+                    original_len = len(nodes)
+                    nodes = [n for n in nodes if n.get("id") != node_id]
+                    if len(nodes) < original_len:
+                        _save_nodes(nodes)
+                        ok = True
+                if ok:
+                    _json(self, 200, {"ok": True, "deleted": node_id})
+                else:
+                    _json(self, 404, {"error": "node not found"})
+                return
+
+            # DELETE /api/approved_examples/{id}
+            m = re.match(r"^/api/approved_examples/([^/]+)$", path)
+            if m:
+                ex_id = m.group(1)
+                ok = delete_approved_example_api(ex_id)
+                if ok:
+                    _json(self, 200, {"ok": True, "deleted": ex_id})
+                else:
+                    _json(self, 404, {"error": "example not found"})
+                return
+
+            _json(self, 404, {"error": "not found"})
+
+        except Exception as e:
+            _json(self, 500, {"error": str(e)})
+
+    def do_PUT(self) -> None:
+        rid = self._start_request()
+        path = urlparse(self.path).path
+        _log.info("[api:%s] PUT %s", rid, path)
+        try:
+            body = self._read_json()
+
+            # PUT /api/memory/{id}
+            m = re.match(r"^/api/memory/([^/]+)$", path)
+            if m:
+                mem_id = m.group(1)
+                store = _get_store()
+                fields = {}
+                for key in ("content", "importance", "category", "tags"):
+                    if key in body:
+                        fields[key] = body[key]
+                if not fields:
+                    _json(self, 400, {"error": "no valid fields to update"})
+                    return
+                updated = store.update(mem_id, **fields)
+                if updated:
+                    _json(self, 200, {"ok": True, "memory": updated})
+                else:
+                    _json(self, 404, {"error": "memory not found"})
+                return
+
+            # PUT /api/approved_examples/{id} — edit / approve / reject a training example
+            m = re.match(r"^/api/approved_examples/([^/]+)$", path)
+            if m:
+                ex_id = m.group(1)
+                updated = update_approved_example_api(ex_id, body)
+                if updated:
+                    _json(self, 200, {"ok": True, "example": updated})
+                else:
+                    _json(self, 404, {"error": "example not found"})
+                return
+
+            _json(self, 404, {"error": "not found"})
+
+        except Exception as e:
+            _json(self, 500, {"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Background heartbeat thread (node liveness)
+# ---------------------------------------------------------------------------
+
+
+_heartbeat_thread: threading.Thread | None = None
+
+
+def _heartbeat_loop() -> None:
+    """Background thread that sends heartbeats for the local node."""
+    while not _stop.is_set():
+        try:
+            get_nodes_with_local()
+        except Exception:
+            pass
+        _stop.wait(_HEARTBEAT_INTERVAL)
+
+
+def _start_heartbeat() -> None:
+    global _heartbeat_thread
+    if _heartbeat_thread and _heartbeat_thread.is_alive():
+        return
+    _heartbeat_thread = threading.Thread(
+        target=_heartbeat_loop, daemon=True, name="doof-heartbeat"
+    )
+    _heartbeat_thread.start()
+
+
+# ---------------------------------------------------------------------------
+# Server entry point
+# ---------------------------------------------------------------------------
+
+
+def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+    global _boot
+    try:
+        from doof.updates.client import finish_pending_update
+        result = finish_pending_update()
+        if result:
+            _log.info("pending update: %s", result)
+    except Exception as e:
+        _log.info("pending update: %s", e)
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _boot.update({"phase": "runtime", "ready": False})
+    _seed_train_txt()
+
+    if SETT.exists():
+        try:
+            _settings.update(json.loads(SETT.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+
+    _boot["phase"] = "database"
+    try:
+        _db()
+    except Exception as e:
+        _log.error("database init: %s", e)
+
+    _boot["phase"] = "cloud"
+    try:
+        from doof.cloud import cloud_status
+        cloud_status()
+    except Exception:
+        pass
+
+    _boot["phase"] = "ai"
+    # Probe checkpoint metadata for Brain page display (no model in memory yet)
+    try:
+        _probe_checkpoint()
+        _log.info("checkpoint probe: %s", _boot_probe.get("checkpoint_name") if _boot_probe else "none")
+    except Exception as e:
+        _log.info("checkpoint probe: %s", e)
+
+    # Resume any model uploads that failed while offline (no-op when queue empty)
+    try:
+        _retry_pending_model_uploads()
+    except Exception as e:
+        _log.info("pending model upload retry: %s", e)
+
+    # Best-effort discovery: pull the best approved model from the registry.
+    # Offline-safe — falls back to the bundled/local checkpoint on any failure.
+    try:
+        best = _try_resolve_best_model()
+        if best:
+            _log.info("registry model resolved: %s", best)
+    except Exception as e:
+        _log.info("registry model resolve: %s", e)
+
+    _boot["phase"] = "network"
+    try:
+        get_nodes_with_local()
+    except Exception as e:
+        _log.error("node register: %s", e)
+
+    _start_heartbeat()
+    try:
+        from doof.compute.pool import start_worker_loop
+        start_worker_loop(_machine_id)
+    except Exception as e:
+        _log.error("compute worker: %s", e)
+
+    _boot.update({"phase": "ready", "ready": True})
+    s = ThreadingHTTPServer((host, port), Handler)
+    _log.info("DOOF API v%s listening on http://%s:%s", DOOF_VERSION, host, port)
+    try:
+        s.serve_forever()
+    except KeyboardInterrupt:
+        _log.info("stopped")
+        s.shutdown()
+
+
+if __name__ == "__main__":
+    run_server()

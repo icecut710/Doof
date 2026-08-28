@@ -15,6 +15,8 @@ _LINES: dict[str, list[tuple[str, str]]] = {
         ("Shawarmas: Fresh", "All core services are responding normally."),
         ("Lebanon is secure", "Runtime, database, and network are healthy."),
         ("Grill: Hot", "This machine is ready to cook."),
+        ("Naddaf has entered the compute pool", "An additional contributor is online."),
+        ("Red Bull reserves nominal", "Energy reserves are healthy."),
     ],
     "degraded": [
         ("Grill: Uneven heat", "Some services are slow or only partly available."),
@@ -35,6 +37,7 @@ _LINES: dict[str, list[tuple[str, str]]] = {
     "network": [
         ("Calling Lebanon", "Looking for other DOOF nodes."),
         ("The table is set", "Friends on this network can share compute."),
+        ("The waterfountain has achieved consciousness", "The mesh network is fully aware."),
     ],
     "network_empty": [
         ("You are the only grill", "No other nodes are online. Local fallback is active."),
@@ -43,10 +46,13 @@ _LINES: dict[str, list[tuple[str, str]]] = {
     "ai": [
         ("Brain: Awake", "A local or remote model is ready for chat."),
         ("The secret recipe is loaded", "Inference is available."),
+        ("The brain is thinking way too hard", "The model is under heavy load."),
     ],
     "ai_fallback": [
         ("Backup brain is on duty", "The primary model failed. A fallback is answering."),
         ("Cooking from memory", "Local weights are unavailable; shared memory is in use."),
+        ("Borrowing compute from the smartest computer in the room", "A stronger model is handling this."),
+        ("Convincing the model to lock in", "Persuading the fallback to give its best output."),
     ],
     "ai_down": [
         ("The local brain failed to start", "Chat fell back so the app stays usable."),
@@ -80,6 +86,10 @@ _LINES: dict[str, list[tuple[str, str]]] = {
         ("Checking the table…", "Looking for other DOOF nodes."),
         ("DOOF is thinking about it…", "Finishing startup."),
         ("Shawarmas: Fresh", "Ready."),
+        ("Naddaf is negotiating with the GPU", "Hardware initialization in progress."),
+        ("Teaching the neurons in the back row", "Warming up the model."),
+        ("Checking classroom waterfountain pressure", "Verifying resource availability."),
+        ("DOOF is pretending this was intentional", "Something unexpected happened, but it is fine."),
     ],
     "contribute_on": [
         ("This grill is open", "This machine will accept remote jobs you allowed."),
@@ -120,13 +130,67 @@ _LINES: dict[str, list[tuple[str, str]]] = {
     "update_failed": [
         ("The upgrade order fell through", "Your current version is unchanged."),
     ],
+    "work_along": [
+        ("Work-A-Long protocol", "A collaborator is helping with the order."),
+        ("Consulting the sacred Work-A-Long", "Distributed tasks are in progress."),
+        ("Refilling the Classroom Waterfountain", "Pausing to hydrate the compute pool."),
+    ],
+    "hardware_active": [
+        ("DOOF is using your GPU for an active AI workload", "The grill is running hot."),
+    ],
+    "hardware_idle": [
+        ("DOOF compute idle", "The GPU is available but not cooking."),
+        ("Grill cooling down", "Hardware resources are resting."),
+    ],
+    "update_checking": [
+        ("Checking for updates...", "Querying the package index."),
+        ("Asking Lebanon if there's a newer version", "Reaching out for version info."),
+    ],
+    "update_found": [
+        ("New DOOF available", "A newer release was found."),
+        ("DOOF got less stupid", "An upgrade is ready to apply."),
+    ],
+    "update_apply": [
+        ("Applying update...", "Swapping in the new release."),
+        ("Swapping the shawarma on the grill", "The update is being installed."),
+    ],
+    "neuralshawarma": [
+        ("Neural Shawarma Index: optimal", "All brain cells are freshly wrapped."),
+        ("The neurons are well-seasoned", "Model weights are loaded and ready."),
+    ],
+    "compute_goblins": [
+        ("Compute goblins are resting", "Background workers are idle."),
+        ("The goblins want more VRAM", "Workers are available but need GPU time."),
+        ("Goblins dispatched", "Compute workers are active on a job."),
+    ],
+    "hallway_compute": [
+        ("Hallway compute is live", "LAN nodes are sharing work."),
+        ("The hallway is quiet", "No peer nodes are active right now."),
+    ],
+    "cafeteria_network": [
+        ("Cafeteria network: operational", "The shared state is synchronized."),
+        ("Lunch rush incoming", "Multiple clients are syncing."),
+    ],
+    "emergency_braincell": [
+        ("Emergency braincell reserve: stocked", "Fallback knowledge base is loaded."),
+        ("Last braincell: deployed", "The final fallback has been activated."),
+    ],
+    "rusty_tuna": [
+        ("Rusty Tuna Can Protocol active", "Using minimal resources."),
+        ("The tuna can is warm", "Running in low-resource mode."),
+    ],
+    "brain_update": [
+        ("Brain update available", "A newer model is ready to download."),
+        ("Fresh neurons delivered", "New model weights have been loaded."),
+        ("The brain got a haircut", "Model has been updated."),
+    ],
 }
 
 
 def pick(kind: str, *, seed: str | None = None) -> tuple[str, str]:
     options = _LINES.get(kind) or _LINES["errors"]
     if seed is None:
-        return options[0]
+        return random.choice(options)
     h = hashlib.sha256(f"{kind}:{seed}".encode()).digest()
     return options[int.from_bytes(h[:2], "big") % len(options)]
 

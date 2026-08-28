@@ -156,6 +156,11 @@ class Store:
             "high_importance": sum(1 for i in all_items if i.get("importance") == "high"),
         }
 
+    def clear(self) -> None:
+        with self._lock:
+            self._items = {}
+            self._save()
+
     def export_training_lines(self) -> list[str]:
         """Return approved memory content as training corpus lines."""
         with self._lock:

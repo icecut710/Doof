@@ -7,13 +7,18 @@ import threading
 import unittest
 from http.client import HTTPConnection
 
-os.environ["DOOF_DISABLE_TORCH"] = "1"
-os.environ.pop("SUPABASE_URL", None)
-os.environ.pop("SUPABASE_ANON_KEY", None)
-os.environ.pop("XAI_API_KEY", None)
-
 
 class GenerateFallbackTests(unittest.TestCase):
+    def setUp(self):
+        os.environ["DOOF_DISABLE_TORCH"] = "1"
+        # Reset the torch import cache so the env var takes effect
+        import doof.runtime as _rt
+        _rt._torch_tried = False
+        _rt._torch_mod = None
+
+    def tearDown(self):
+        os.environ.pop("DOOF_DISABLE_TORCH", None)
+
     @classmethod
     def setUpClass(cls):
         from doof.api import run_server

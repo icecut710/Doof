@@ -3,27 +3,22 @@ from __future__ import annotations
 
 import unittest
 
-from doof.brain import lightweight_answer, postprocess_model_text, build_prompt
+from doof.brain import memory_answer, math_answer, postprocess_model_text, build_prompt
 
 
 class BrainTests(unittest.TestCase):
-    def test_not_universal_memory_refusal(self):
-        text = lightweight_answer("What is 12 × 8?")
+    def test_math_computation(self):
+        text = math_answer("What is 12 × 8?")
         self.assertEqual(text.strip(), "96")
-        self.assertNotIn("I do not have that in memory yet", text)
-
-    def test_identity_is_compositional(self):
-        a = lightweight_answer("Tell me about yourself.")
-        b = lightweight_answer("Who are you?")
-        self.assertIn("DOOF", a)
-        self.assertIn("DOOF", b)
-        # Must not be the old universal memory refusal
-        self.assertNotIn("Add it in Memory, then train", a)
 
     def test_memory_used_when_relevant(self):
         mem = [{"content": "User favorite food is shawarma", "id": "1"}]
-        text = lightweight_answer("What is my favorite food?", mem)
+        text = memory_answer("What is my favorite food?", mem)
         self.assertIn("shawarma", text.lower())
+
+    def test_memory_returns_empty_when_no_match(self):
+        text = memory_answer("What is quantum physics?", [])
+        self.assertEqual(text, "")
 
     def test_build_prompt_includes_user(self):
         p = build_prompt("Hello there", [])
@@ -32,7 +27,26 @@ class BrainTests(unittest.TestCase):
 
     def test_postprocess_keeps_good_text(self):
         good = "DOOF is a private AI that can use shared memory."
-        self.assertEqual(postprocess_model_text(good, "who are you"), good)
+        cleaned, source = postprocess_model_text(good, "who are you")
+        self.assertEqual(cleaned, good)
+        self.assertEqual(source, "model")
+
+    def test_postprocess_garbled_returns_empty(self):
+        garbled = "!!!###$$$%%%" * 5
+        cleaned, source = postprocess_model_text(garbled, "who are you")
+        self.assertEqual(source, "empty")
+        self.assertEqual(cleaned, "")
+
+    def test_postprocess_empty_returns_empty(self):
+        cleaned, source = postprocess_model_text("", "hello")
+        self.assertEqual(source, "empty")
+        self.assertEqual(cleaned, "")
+
+    def test_postprocess_memory_fallback(self):
+        mem = [{"content": "User prefers dark mode", "id": "m1"}]
+        cleaned, source = postprocess_model_text("", "What is my favorite setting?", mem)
+        self.assertEqual(source, "memory")
+        self.assertIn("dark mode", cleaned.lower())
 
 
 if __name__ == "__main__":

@@ -25,8 +25,20 @@ try:
 except Exception:
     ROOT = Path(__file__).resolve().parents[2]
     DATA_DIR = ROOT / "data"
-DATASETS_DIR = ROOT / "datasets"
-CKPT_DIR = ROOT / "checkpoints"
+
+
+def _ckpt_dir() -> Path:
+    """Resolve checkpoint dir lazily (honors DOOF_CHECKPOINTS_DIR / frozen layout)."""
+    try:
+        from doof.paths import checkpoints_dir
+
+        return checkpoints_dir()
+    except Exception:
+        return ROOT / "checkpoints"
+
+
+DATASETS_DIR = user_data_dir() / "datasets"
+CKPT_DIR = _ckpt_dir()
 EVAL_LOG = DATA_DIR / "eval_log.json"
 
 
@@ -93,15 +105,23 @@ def evaluate_checkpoint(
         from doof.inference import DOOFInference
 
         # Resolve checkpoint
+        ckpt_dir = _ckpt_dir()
         if checkpoint_path is None:
-            candidates = [CKPT_DIR / "doof_v01.pt"] + sorted(
-                CKPT_DIR.glob("doof_step_*.pt")
+            candidates = [ckpt_dir / "doof_v01.pt"] + sorted(
+                ckpt_dir.glob("doof_step_*.pt")
             )
             existing = [c for c in candidates if c.exists()]
             if not existing:
                 result["status"] = "no_checkpoint"
                 return result
             checkpoint_path = existing[-1]
+        else:
+            # Resolve bare filenames against the checkpoint directory
+            cp = Path(checkpoint_path)
+            if not cp.is_absolute() and not cp.is_file():
+                resolved = ckpt_dir / cp.name
+                if resolved.is_file():
+                    checkpoint_path = resolved
 
         result["checkpoint"] = str(checkpoint_path)
 

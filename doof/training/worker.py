@@ -31,13 +31,18 @@ from typing import Any
 from doof import __version__
 
 try:
-    from doof.paths import bundle_root, user_data_dir
+    from doof.paths import bundle_root, user_data_dir, checkpoints_dir
     ROOT = bundle_root()
     DATA_DIR = user_data_dir()
 except Exception:
     ROOT = Path(__file__).resolve().parents[2]
     DATA_DIR = ROOT / "data"
-CKPT_DIR = ROOT / "checkpoints"
+# Writable checkpoints dir — frozen builds write to %LOCALAPPDATA%\DOOF,
+# never inside the immutable PyInstaller bundle.
+try:
+    CKPT_DIR = checkpoints_dir()
+except Exception:
+    CKPT_DIR = DATA_DIR / "checkpoints"
 
 
 def _hardware_summary() -> dict[str, Any]:
@@ -262,82 +267,92 @@ class TrainingWorker:
         loss_val = 0.0
         total_steps = epochs * 100
 
-        for epoch in range(epochs):
-            if self._stop_event.is_set():
-                break
-
-            for batch_i in tqdm(range(100), desc=f"Epoch {epoch + 1}/{epochs}"):
+        try:
+            for epoch in range(epochs):
                 if self._stop_event.is_set():
                     break
 
-                tr.model.train()
-                x, y = tr.create_batches(tokens)
-                tr.optimizer.zero_grad(set_to_none=True)
+                for batch_i in tqdm(range(100), desc=f"Epoch {epoch + 1}/{epochs}"):
+                    if self._stop_event.is_set():
+                        break
 
-                with autocast(
-                    device_type=tr.device.type,
-                    dtype=torch.float16,
-                    enabled=tr.device.type == "cuda",
-                ):
-                    logits = tr.model(x)
-                    loss = F.cross_entropy(
-                        logits.reshape(-1, logits.size(-1)),
-                        y.reshape(-1),
-                    )
+                    tr.model.train()
+                    x, y = tr.create_batches(tokens)
+                    tr.optimizer.zero_grad(set_to_none=True)
 
-                tr.scaler.scale(loss).backward()
-                tr.scaler.unscale_(tr.optimizer)
-                torch.nn.utils.clip_grad_norm_(tr.model.parameters(), 1.0)
-                tr.scaler.step(tr.optimizer)
-                tr.scaler.update()
+                    with autocast(
+                        device_type=tr.device.type,
+                        dtype=torch.float16,
+                        enabled=tr.device.type == "cuda",
+                    ):
+                        logits = tr.model(x)
+                        loss = F.cross_entropy(
+                            logits.reshape(-1, logits.size(-1)),
+                            y.reshape(-1),
+                        )
 
-                step += 1
-                loss_val = float(loss.item())
+                    tr.scaler.scale(loss).backward()
+                    tr.scaler.unscale_(tr.optimizer)
+                    torch.nn.utils.clip_grad_norm_(tr.model.parameters(), 1.0)
+                    tr.scaler.step(tr.optimizer)
+                    tr.scaler.update()
 
-                # Update job progress via DB
-                if step % 10 == 0:
-                    self.db.update_training_job(
-                        job["id"],
-                        step=step,
-                        epoch=epoch + 1,
-                        loss=round(loss_val, 4),
-                    )
+                    step += 1
+                    loss_val = float(loss.item())
 
-            tr.save_checkpoint(step, loss_val)
+                    # Update job progress via DB
+                    if step % 10 == 0:
+                        self.db.update_training_job(
+                            job["id"],
+                            step=step,
+                            epoch=epoch + 1,
+                            loss=round(loss_val, 4),
+                        )
 
-        # Final checkpoint
-        ckpt_name = f"doof_v{__version__}_job_{job['id'][:8]}.pt"
-        final_path = CKPT_DIR / ckpt_name
-        torch.save(
-            {
-                "model_state_dict": tr.model.state_dict(),
-                "step": step,
-                "loss": loss_val,
-                "model_config": {
-                    "vocab_size": tr.tokenizer.vocab_size,
-                    "max_seq_len": cfg.seq_len,
-                    "d_model": tr.model.d_model,
+                tr.save_checkpoint(step, loss_val)
+
+            # Final checkpoint
+            ckpt_name = f"doof_v{__version__}_job_{job['id'][:8]}.pt"
+            final_path = CKPT_DIR / ckpt_name
+            torch.save(
+                {
+                    "model_state_dict": tr.model.state_dict(),
+                    "step": step,
+                    "loss": loss_val,
+                    "model_config": {
+                        "vocab_size": tr.tokenizer.vocab_size,
+                        "max_seq_len": cfg.seq_len,
+                        "d_model": tr.model.d_model,
+                        "n_heads": tr.model.n_heads,
+                        "n_layers": tr.model.n_layers,
+                    },
+                    "config": cfg.__dict__,
                 },
-                "config": cfg.__dict__,
-            },
-            final_path,
-        )
+                final_path,
+            )
 
-        # ------------------------------------------------------------------
-        # Upload checkpoint + brain version to Supabase (or local)
-        # ------------------------------------------------------------------
-        self._upload_brain_version(ckpt_name, step, loss_val, dataset_version)
+            # Save tokenizer alongside checkpoint
+            tr.tokenizer.save_for_checkpoint(CKPT_DIR)
 
-        # Mark job as done
-        self.db.update_training_job(
-            job["id"],
-            status="done",
-            step=step,
-            epoch=epochs,
-            loss=round(loss_val, 4),
-            checkpoint_name=ckpt_name,
-            finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        )
+            # ------------------------------------------------------------------
+            # Upload checkpoint + brain version to Supabase (or local)
+            # ------------------------------------------------------------------
+            self._upload_brain_version(ckpt_name, step, loss_val, dataset_version)
+
+            # Mark job as done
+            self.db.update_training_job(
+                job["id"],
+                status="done",
+                step=step,
+                epoch=epochs,
+                loss=round(loss_val, 4),
+                checkpoint_name=ckpt_name,
+                finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            )
+        finally:
+            # Always release training resources from memory
+            tr.cleanup()
+            del tokens
 
         self._current_job = None
 

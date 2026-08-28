@@ -4,7 +4,7 @@ cd /d "%~dp0\.."
 
 echo.
 echo  ============================================
-echo   DOOF v0.3 — friend-ready onedir build
+echo   DOOF v3.0 - build
 echo  ============================================
 echo.
 
@@ -28,15 +28,14 @@ if errorlevel 1 (
   python -m pip install pyinstaller python-dotenv
 )
 
-REM Friend builds default to CPU torch (~600-800MB) instead of CUDA (~5GB).
-REM Owner GPU builds: set DOOF_KEEP_CUDA=1 before running this script,
-REM and ensure a CUDA torch wheel is already installed in the venv.
-if defined DOOF_KEEP_CUDA (
-  echo [build] DOOF_KEEP_CUDA=1 — keeping existing torch (use CUDA wheel for GPU EXE)
+REM Detect CUDA torch — NEVER uninstall a working CUDA install.
+python -c "import torch; assert torch.cuda.is_available()" 2>nul
+if errorlevel 1 (
+  echo [build] CUDA torch not detected. Building CPU-only package.
+  echo [build] To build with GPU support, install CUDA torch first:
+  echo [build]   pip install torch --index-url https://download.pytorch.org/whl/cu128
 ) else (
-  echo [build] Installing CPU-only torch for a shareable EXE
-  python -m pip uninstall -y torch
-  python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+  echo [build] CUDA torch detected — packaging GPU-enabled build.
 )
 
 echo [build] Running packaging\build_exe.py ...
@@ -48,9 +47,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo  DONE. Output: dist\DOOF\DOOF.exe
-echo  Read:         dist\DOOF\README_FIRST.txt
-echo  Zip the whole dist\DOOF folder (EXE + _internal) to share.
-echo  GPU owner rebuild: set DOOF_KEEP_CUDA=1 and install cu124 torch first.
+echo  DONE. Output: dist\Doof v3.0\Doof v3.0.exe
+echo  Read:         dist\Doof v3.0\README_FIRST.txt
+echo  Zip the whole dist\Doof v3.0 folder (EXE + _internal) to share.
 echo.
 exit /b 0

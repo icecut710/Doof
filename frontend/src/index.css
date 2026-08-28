@@ -3,11 +3,30 @@
 :root {
   --doof-beat: 0;
   --doof-glow: 0.04;
-  --doof-bg: #050506;
+  /* Unified surface palette — near-black with subtle violet undertones */
+  --doof-bg: #040406;
+  --doof-surface-0: #030304;
+  --doof-surface-1: #080809;
+  --doof-surface-2: #0c0c0e;
+  --doof-surface-3: #111114;
+  --doof-surface-4: #18181c;
+  /* Text hierarchy */
   --doof-fg: #e4e4e7;
   --doof-muted: #a1a1aa;
+  --doof-subtle: #71717a;
+  /* Violet accent system */
   --doof-accent: #a78bfa;
-  /* Intentional radius system — not everything is a pill */
+  --doof-accent-dim: #7c3aed;
+  --doof-accent-bright: #c4b5fd;
+  --doof-accent-glow: rgba(139, 92, 246, 0.35);
+  /* Neon glow color */
+  --doof-neon: rgba(139, 92, 246, 0.25);
+  --doof-neon-strong: rgba(167, 139, 250, 0.4);
+  /* Status colors */
+  --doof-success: #34d399;
+  --doof-danger: #fb7185;
+  --doof-warning: #fbbf24;
+  /* Intentional radius system */
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
@@ -18,8 +37,8 @@
 html, body, #root {
   height: 100%;
   margin: 0;
-  background: #050506;
-  color: #e4e4e7;
+  background: var(--doof-bg);
+  color: var(--doof-fg);
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
   font-size: 15px;
   line-height: 1.5;
@@ -40,28 +59,60 @@ button:not(:disabled),
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* Cards — medium radius, quiet border */
+/* ---- Grid background pattern ---- */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(rgba(139, 92, 246, 0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(139, 92, 246, 0.015) 1px, transparent 1px);
+  background-size: 60px 60px;
+  mask-image: radial-gradient(ellipse at 50% 40%, black 30%, transparent 70%);
+  -webkit-mask-image: radial-gradient(ellipse at 50% 40%, black 30%, transparent 70%);
+}
+
+/* ---- Cards ---- */
 .doof-card {
   border-radius: var(--radius-lg);
   border: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(10, 10, 12, 0.92);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+  transition: box-shadow 0.25s ease, border-color 0.25s ease;
+}
+.doof-card:hover {
+  border-color: rgba(139, 92, 246, 0.15);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22), 0 0 20px rgba(139, 92, 246, 0.08);
 }
 
+/* ---- Buttons ---- */
 .doof-btn {
   border-radius: var(--radius-md);
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.04);
-  color: #e4e4e7;
+  color: var(--doof-fg);
   font-size: 13px;
   padding: 0.45rem 0.85rem;
+  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
 }
-.doof-btn:hover { background: rgba(255, 255, 255, 0.07); }
+.doof-btn:hover {
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.1);
+}
 .doof-btn-primary {
   border-color: rgba(167, 139, 250, 0.35);
   background: rgba(124, 58, 237, 0.22);
   color: #ede9fe;
 }
+.doof-btn-primary:hover {
+  border-color: rgba(167, 139, 250, 0.5);
+  background: rgba(124, 58, 237, 0.32);
+  box-shadow: 0 0 20px rgba(139, 92, 246, 0.2);
+}
+
+/* ---- Inputs ---- */
 .doof-input {
   border-radius: var(--radius-md);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -69,11 +120,40 @@ button:not(:disabled),
   color: #f4f4f5;
   font-size: 14px;
   padding: 0.55rem 0.75rem;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
-.doof-pill {
-  border-radius: var(--radius-pill);
+.doof-input:focus {
+  border-color: rgba(139, 92, 246, 0.35);
+  box-shadow: 0 0 16px rgba(139, 92, 246, 0.12);
 }
 
+.doof-pill { border-radius: var(--radius-pill); }
+
+/* ---- Gradient border utility ---- */
+.border-gradient-violet {
+  position: relative;
+  border: 1px solid transparent !important;
+  background-clip: padding-box;
+}
+.border-gradient-violet::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(139,92,246,0.25), rgba(167,139,250,0.08), rgba(139,92,246,0.15));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.border-gradient-violet:hover::before {
+  opacity: 1;
+}
+
+/* ---- Animations ---- */
 @keyframes doof-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
@@ -83,8 +163,12 @@ button:not(:disabled),
   to { opacity: 1; transform: translateY(0); }
 }
 @keyframes doof-boot-breathe {
-  0%, 100% { transform: scale(1); box-shadow: 0 0 28px rgba(124,58,237,0.22); }
-  50% { transform: scale(1.03); box-shadow: 0 0 48px rgba(124,58,237,0.4); }
+  0%, 100% { transform: scale(1); box-shadow: 0 0 28px rgba(124,58,237,0.3); }
+  50% { transform: scale(1.03); box-shadow: 0 0 56px rgba(124,58,237,0.5); }
+}
+@keyframes doof-scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
 }
 
 .doof-fade { animation: doof-fade-in 0.28s ease-out both; }
@@ -98,30 +182,115 @@ button:not(:disabled),
   }
 }
 
+/* ---- Boot screen orbits + shimmer ---- */
+@keyframes doof-orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@keyframes doof-shimmer {
+  from { transform: translateX(-150%); }
+  to { transform: translateX(450%); }
+}
+.doof-orbit-slow { animation: doof-orbit 6s linear infinite; }
+.doof-orbit-fast { animation: doof-orbit 3.2s linear infinite reverse; }
+
+/* ---- Chat typing indicator ---- */
+@keyframes doof-typing-dot {
+  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+.doof-typing-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: rgb(196 181 253);
+  animation: doof-typing-dot 1.2s ease-in-out infinite;
+}
+
+
+/* ---- Reactive glow effects ---- */
 .doof-beat-glow {
-  opacity: calc(0.065 + var(--doof-beat) * 0.07);
+  opacity: calc(0.08 + var(--doof-beat) * 0.1);
   transform: scale(calc(1 + var(--doof-beat) * 0.04));
   transition: opacity 0.08s linear, transform 0.08s linear;
   will-change: opacity, transform;
 }
 
 .doof-beat-aura {
-  opacity: calc(0.018 + var(--doof-beat) * 0.025);
+  opacity: calc(0.025 + var(--doof-beat) * 0.035);
   transition: opacity 0.1s linear;
 }
 
 .doof-nav-active-beat {
   box-shadow:
-    inset 0 0 0 1px rgba(139, 92, 246, calc(0.18 + var(--doof-beat) * 0.12)),
-    0 0 18px rgba(139, 92, 246, calc(0.1 + var(--doof-beat) * 0.14));
+    inset 0 0 0 1px rgba(139, 92, 246, calc(0.22 + var(--doof-beat) * 0.15)),
+    0 0 22px rgba(139, 92, 246, calc(0.14 + var(--doof-beat) * 0.18));
 }
 
 .doof-logo-beat {
-  box-shadow: 0 0 calc(12px + var(--doof-beat) * 10px) rgba(124, 58, 237, calc(0.1 + var(--doof-beat) * 0.18));
-  border-color: rgba(167, 139, 250, calc(0.2 + var(--doof-beat) * 0.15));
+  box-shadow: 0 0 calc(14px + var(--doof-beat) * 12px) rgba(124, 58, 237, calc(0.15 + var(--doof-beat) * 0.22));
+  border-color: rgba(167, 139, 250, calc(0.25 + var(--doof-beat) * 0.18));
 }
 
 .doof-star-beat {
-  opacity: calc(var(--star-base, 0.08) + var(--doof-beat) * 0.12);
+  opacity: calc(var(--star-base, 0.08) + var(--doof-beat) * 0.14);
   transition: opacity 0.12s linear;
+}
+
+/* ---- Hover glow utility for cards/panels ---- */
+.hover-glow {
+  transition: box-shadow 0.25s ease, border-color 0.25s ease, transform 0.25s ease;
+}
+.hover-glow:hover {
+  box-shadow: 0 0 24px rgba(139, 92, 246, 0.12), 0 8px 32px rgba(0, 0, 0, 0.3);
+  border-color: rgba(139, 92, 246, 0.18);
+  transform: translateY(-1px);
+}
+
+/* ---- Premium glass surface ---- */
+.doof-glass {
+  background: rgba(8, 8, 10, 0.85);
+  backdrop-filter: blur(16px) saturate(1.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+/* ---- Subtle focus ring ---- */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 1px solid rgba(139, 92, 246, 0.5);
+  outline-offset: 1px;
+}
+
+/* ---- Smooth transitions for interactive elements ---- */
+.doof-card,
+.doof-btn,
+.doof-input {
+  transition-property: background, border-color, box-shadow, opacity, transform;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ---- Reduced motion support ---- */
+@media (prefers-reduced-motion: reduce) {
+  .doof-card,
+  .doof-btn,
+  .doof-input {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---- Notification slide-in ---- */
+@keyframes doof-notif-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.doof-notif {
+  animation: doof-notif-in 0.25s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .doof-notif { animation: none !important; }
 }

@@ -24,8 +24,14 @@ function token() {
   return localStorage.getItem("doof_token") || sessionStorage.getItem("doof_token") || "";
 }
 
+type UpdateSettings = {
+  channel?: string;
+  check_on_start?: boolean;
+};
+
 export default function UpdatesTab() {
   const [info, setInfo] = useState<UpdateInfo | null>(null);
+  const [settings, setSettings] = useState<UpdateSettings | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [showTech, setShowTech] = useState(false);
@@ -38,6 +44,14 @@ export default function UpdatesTab() {
       setInfo((await res.json()) as UpdateInfo);
     } catch {
       setInfo({ error: "Could not check for updates.", current: "—" });
+    }
+    try {
+      const res = await fetch(`${base()}/api/updates/settings`, {
+        headers: token() ? { Authorization: `Bearer ${token()}` } : {},
+      });
+      if (res.ok) setSettings((await res.json()) as UpdateSettings);
+    } catch {
+      /* settings are optional */
     }
   }, []);
 
@@ -64,6 +78,22 @@ export default function UpdatesTab() {
       setMsg("Could not start the update.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const saveSetting = async (patch: UpdateSettings) => {
+    try {
+      const res = await fetch(`${base()}/api/updates/settings`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token() ? { Authorization: `Bearer ${token()}` } : {}),
+        },
+        body: JSON.stringify(patch),
+      });
+      if (res.ok) setSettings((await res.json()) as UpdateSettings);
+    } catch {
+      /* keep previous */
     }
   };
 
@@ -142,6 +172,28 @@ export default function UpdatesTab() {
           </>
         )}
         {msg && <p className="mt-3 text-[13px] text-zinc-400">{msg}</p>}
+      </div>
+
+      <div className="mt-3 rounded-2xl border border-white/[0.06] bg-[#0a0a0c]/90 p-4">
+        <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Update settings</div>
+        {settings ? (
+          <div className="mt-2 space-y-2">
+            <label className="flex items-center justify-between gap-3">
+              <span className="text-[13px] text-zinc-300">Check for updates when DOOF starts</span>
+              <input
+                type="checkbox"
+                checked={Boolean(settings.check_on_start)}
+                onChange={(e) => void saveSetting({ check_on_start: e.target.checked })}
+                className="h-4 w-4 accent-violet-500"
+              />
+            </label>
+            {settings.channel && (
+              <p className="text-[12px] text-zinc-600">Channel: {settings.channel}</p>
+            )}
+          </div>
+        ) : (
+          <p className="mt-2 text-[12px] text-zinc-600">Settings unavailable.</p>
+        )}
       </div>
 
       <p className="mt-4 max-w-md text-[12px] leading-relaxed text-zinc-600">

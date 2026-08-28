@@ -19,7 +19,7 @@ class VersionTests(unittest.TestCase):
 
     def test_current(self):
         v = current_version()
-        self.assertTrue(v.startswith("0."))
+        self.assertTrue(v.startswith("3."))
 
 
 class CheckTests(unittest.TestCase):

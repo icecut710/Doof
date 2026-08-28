@@ -11,12 +11,21 @@ def install() -> None:
     try:
         from doof import api as api_mod
         from doof.api_extra import try_handle
-        from doof.brain import lightweight_answer
+        from doof.brain import memory_answer, math_answer
     except Exception as exc:
         print(f"[api_mount] skip: {exc}")
         return
 
-    api_mod._answer_from_memory = lambda prompt, memories=None: lightweight_answer(prompt, memories or [])
+    def _memory_fallback(prompt, memories=None):
+        math = math_answer(prompt or "")
+        if math:
+            return math
+        mem = memory_answer(prompt or "", memories or [])
+        if mem:
+            return mem
+        return "The model could not generate a response. Try rephrasing, or add relevant information to Memory so DOOF can help."
+
+    api_mod._answer_from_memory = _memory_fallback
 
     try:
         from doof.compute.pool_patch import install as patch_pool

@@ -34,13 +34,14 @@ _STOP_WORDS = frozenset(
     "there when where why how all both each few more most other some such "
     "no nor not only own same so than too very s t just don don't should've "
     "i you he she it we they what which who this that these those am and or "
-    "but if because as until while".split()
+    "but if because as until while like know tell about what is are your my "
+    "can you how do does that the this these those".split()
 )
 
 
 def _tokenise(text: str) -> list[str]:
     tokens = re.findall(r"[a-zA-Z0-9]+", text.lower())
-    return [t for t in tokens if t not in _STOP_WORDS and len(t) > 1]
+    return [t for t in tokens if t not in _STOP_WORDS and len(t) > 2]
 
 
 def _tf(tokens: list[str]) -> dict[str, float]:
@@ -65,11 +66,17 @@ def _bm25_score(
     dl = len(doc_tokens)
     tf_map = _tf(doc_tokens)
     score = 0.0
+    matched = 0
     for term in query_tokens:
-        tf_val = tf_map.get(term, 0.0) * dl  # raw count approximation
+        if term in tf_map:
+            matched += 1
+        tf_val = tf_map.get(term, 0.0) * dl
         numerator = tf_val * (k1 + 1)
         denominator = tf_val + k1 * (1 - b + b * dl / avg_doc_len)
         score += numerator / (denominator + 1e-9)
+    # Require at least 30% of query terms to match in the document
+    if matched < max(1, len(query_tokens) * 0.3):
+        score *= 0.05
     return score
 
 
@@ -122,6 +129,10 @@ def retrieve_memories(
     for mem in memories:
         doc_tokens = _tokenise(mem.get("content", ""))
         raw_score = _bm25_score(query_tokens, doc_tokens)
+
+        # Skip memories with zero keyword overlap
+        if raw_score <= 0:
+            continue
 
         # Boost by importance
         importance = mem.get("importance", "medium")

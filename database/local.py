@@ -448,3 +448,91 @@ def claim_compute_job(job_id: str, worker_id: str) -> dict[str, Any] | None:
     rec["attempts"] = int(rec.get("attempts") or 0) + 1
     _write(_COMPUTE, items)
     return rec
+
+
+# ---------------------------------------------------------------------------
+# Rewards
+# ---------------------------------------------------------------------------
+_REWARDS = DATA / "rewards.json"
+
+
+def insert_reward(record: dict[str, Any]) -> dict[str, Any]:
+    items = _read(_REWARDS)
+    record.setdefault("id", str(uuid.uuid4()))
+    record.setdefault("created_at", _now())
+    record.setdefault("status", "pending")
+    items.append(record)
+    _write(_REWARDS, items)
+    return record
+
+
+def get_rewards(status: str | None = None, user_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    items = _read(_REWARDS)
+    if status:
+        items = [r for r in items if r.get("status") == status]
+    if user_id:
+        items = [r for r in items if r.get("user_id") == user_id]
+    items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return items[:limit]
+
+
+def update_reward(reward_id: str, **fields: Any) -> dict[str, Any] | None:
+    items = _read(_REWARDS)
+    rec = next((r for r in items if r.get("id") == reward_id), None)
+    if rec is None:
+        return None
+    rec.update(fields)
+    _write(_REWARDS, items)
+    return rec
+
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+_MODELS = DATA / "model_registry.json"
+
+
+def list_models() -> list[dict[str, Any]]:
+    return _read(_MODELS)
+
+
+def insert_model(record: dict[str, Any]) -> dict[str, Any]:
+    items = _read(_MODELS)
+    existing = next(
+        (i for i, m in enumerate(items)
+         if m.get("model_id") == record.get("model_id")
+         and m.get("version") == record.get("version")),
+        None,
+    )
+    if existing is not None:
+        items[existing].update(record)
+    else:
+        items.append(record)
+    _write(_MODELS, items)
+    return record
+
+
+def update_model(model_id: str, version: str, **fields: Any) -> dict[str, Any] | None:
+    items = _read(_MODELS)
+    rec = next(
+        (m for m in items if m.get("model_id") == model_id and m.get("version") == version),
+        None,
+    )
+    if rec is None:
+        return None
+    rec.update(fields)
+    _write(_MODELS, items)
+    return rec
+
+
+def delete_model(model_id: str, version: str) -> bool:
+    items = _read(_MODELS)
+    before = len(items)
+    items = [
+        m for m in items
+        if not (m.get("model_id") == model_id and m.get("version") == version)
+    ]
+    if len(items) < before:
+        _write(_MODELS, items)
+        return True
+    return False

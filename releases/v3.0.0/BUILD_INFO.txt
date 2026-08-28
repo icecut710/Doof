@@ -1,0 +1,9 @@
+DOOF v3.0.0 Build Information
+========================================
+Build Type: GPU (CUDA)
+Torch Version: 2.11.0+cu128
+CUDA Available: True
+CUDA Version: 12.8
+GPU: NVIDIA GeForce RTX 5060
+VRAM: 7.96 GB
+Build Date: 2026-08-26 09:30:47

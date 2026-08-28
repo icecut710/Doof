@@ -1,0 +1,22 @@
+{
+  "version": "3.0.0",
+  "version_display": "DOOF v3.0",
+  "build_date": "2026-08-26T13:30:47Z",
+  "build_type": "GPU (CUDA)",
+  "cuda_available": true,
+  "cuda_version": "12.8",
+  "gpu_name": "NVIDIA GeForce RTX 5060",
+  "gpu_vram_gb": 7.96,
+  "torch_version": "2.11.0+cu128",
+  "checkpoint": {
+    "checkpoint_name": "doof_v01.pt",
+    "checkpoint_size_mb": 18.42,
+    "step": 100,
+    "loss": 0.16667072474956512,
+    "vocab_size": 259,
+    "d_model": 256,
+    "max_seq_len": 64,
+    "parameters": 4888064,
+    "parameters_m": 4.89
+  }
+}

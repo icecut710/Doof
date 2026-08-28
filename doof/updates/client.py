@@ -154,20 +154,37 @@ def apply_update(status: UpdateStatus | None = None, *, progress_cb=None) -> dic
         return {"ok": False, "message": "Update failed. Your current version is unchanged.", "needs_restart": False, "technical": f"{type(exc).__name__}: {exc}"}
 
 def finish_pending_update() -> dict[str, Any] | None:
-    from doof.paths import user_data_dir
+    """Apply a staged update. Copies new files to overlay directory.
+
+    For dev mode: copies to the project root so new code takes effect.
+    For frozen mode: copies to user_data/overlay so paths.py picks them up.
+    The app needs a restart after this completes.
+    """
+    from doof.paths import user_data_dir, bundle_root, is_frozen
     pending = user_data_dir() / "updates" / "pending.json"
-    if not pending.is_file(): return None
+    if not pending.is_file():
+        return None
     try:
         data = json.loads(pending.read_text(encoding="utf-8"))
         extract = Path(data["extract"])
+        if not extract.is_dir():
+            pending.rename(pending.with_suffix(".done.json"))
+            return None
+
         overlay = user_data_dir() / "overlay"
         overlay.mkdir(parents=True, exist_ok=True)
+
         for name in ("frontend", "doof"):
             src = extract / name
             if src.exists():
-                dst = overlay / name
-                if dst.exists(): shutil.rmtree(dst, ignore_errors=True)
+                if is_frozen():
+                    dst = overlay / name
+                else:
+                    dst = bundle_root() / name
+                if dst.exists():
+                    shutil.rmtree(dst, ignore_errors=True)
                 shutil.copytree(src, dst)
+
         pending.rename(pending.with_suffix(".done.json"))
         return {"ok": True, "version": data.get("version"), "mode": "overlay"}
     except Exception as exc:

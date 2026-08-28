@@ -1,0 +1,21 @@
+{
+  "model_id": "doof-base",
+  "version": "3.0.1-test",
+  "label": "Test Upload",
+  "format": "doof-pt",
+  "size_bytes": 19316295,
+  "sha256": "85e87e19e3280af0f91af42ba958cc8fafa350573f34757c98ee75e981d530a3",
+  "download_url": "",
+  "channel": "stable",
+  "status": "candidate",
+  "cpu_supported": true,
+  "gpu_supported": true,
+  "min_ram_gb": 4.0,
+  "recommended_ram_gb": 8.0,
+  "min_vram_gb": 0.0,
+  "recommended_vram_gb": 0.0,
+  "notes": "Acceptance test",
+  "local_path": "C:\\Users\\kaecu\\Desktop\\AI\\prod\\Doof-git\\data\\models\\doof-base-3.0.1-test.pt",
+  "installed": true,
+  "verified": true
+}

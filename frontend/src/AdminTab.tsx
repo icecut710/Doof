@@ -14,10 +14,19 @@ type NodeRow = {
   client_version?: string;
   stale?: boolean;
 };
+type UserRow = {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+  provider: string;
+  created_at: string;
+};
 
 type AdminData = {
   allowed?: boolean;
   role?: string;
+  currentUserId?: string;
   health?: { overall?: string; services?: Record<string, Service> };
   pool?: { paused?: boolean; online?: number; accepting?: number; jobs_running?: number };
   nodes?: NodeRow[];
@@ -72,6 +81,13 @@ export default function AdminTab({ online }: { online: boolean }) {
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<string | null>(null);
 
+  const [confirmClear, setConfirmClear] = useState<string | null>(null);
+  const [confirmDisable, setConfirmDisable] = useState<string | null>(null);
+
+  const [users, setUsers] = useState<UserRow[]>([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [roleBusy, setRoleBusy] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     try {
       setData(await adminGet());
@@ -80,11 +96,78 @@ export default function AdminTab({ online }: { online: boolean }) {
     }
   }, []);
 
+  const loadUsers = useCallback(async () => {
+    setUsersLoading(true);
+    try {
+      const res = await fetch(`${base()}/api/admin/users`, {
+        headers: token() ? { Authorization: `Bearer ${token()}` } : {},
+      });
+      const json = await res.json();
+      if (res.ok) setUsers(json.users || []);
+    } catch {
+      /* keep */
+    } finally {
+      setUsersLoading(false);
+    }
+  }, []);
+
+  const updateRole = async (userId: string, newRole: string) => {
+    setRoleBusy(userId);
+    try {
+      await adminPost("/api/admin/users/role", { user_id: userId, role: newRole });
+      await loadUsers();
+    } catch (e) {
+      console.error("Failed to update role:", e);
+    } finally {
+      setRoleBusy(null);
+    }
+  };
+
   useEffect(() => {
     void load();
     const t = setInterval(() => void load(), online ? 8000 : 20000);
     return () => clearInterval(t);
   }, [load, online]);
+
+  useEffect(() => {
+    if (data?.allowed && data.role === "owner") {
+      void loadUsers();
+    }
+  }, [data?.allowed, data?.role, loadUsers]);
+
+  const handleClearTrainingData = async () => {
+    if (confirmClear) {
+      setBusy(true);
+      try {
+        await adminPost("/api/admin/training/clear", {});
+        setConfirmClear(null);
+        void load();
+      } catch (e) {
+        console.error("Failed to clear training data:", e);
+      } finally {
+        setBusy(false);
+      }
+    } else {
+      setConfirmClear("yes");
+    }
+  };
+
+  const handleDisableNode = async (nodeId: string) => {
+    if (confirmDisable === nodeId) {
+      setBusy(true);
+      try {
+        await adminPost("/api/admin/node/disable", { node_id: nodeId });
+        setConfirmDisable(null);
+        void load();
+      } catch (e) {
+        console.error("Failed to disable node:", e);
+      } finally {
+        setBusy(false);
+      }
+    } else {
+      setConfirmDisable(nodeId);
+    }
+  };
 
   if (!data) {
     return (
@@ -220,6 +303,32 @@ export default function AdminTab({ online }: { online: boolean }) {
 
       <div className="rounded-2xl border border-white/[0.06] bg-[#0a0a0c]/90 p-4">
         <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Nodes</div>
+        <div className="mt-3 rounded-2xl border border-white/[0.05] bg-black/40 px-3 py-2.5">
+          <div className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">Training data management</div>
+          <div className="mt-1 flex items-center gap-2">
+            <button
+              type="button"
+              id="clear-training-data"
+              title="Clear all training data"
+              disabled={busy}
+              onClick={() => {
+                if (confirmClear === "yes") void handleClearTrainingData();
+                else setConfirmClear("yes");
+              }}
+              className={[
+                "rounded-lg px-2 py-1 text-[11px] transition disabled:opacity-50",
+                confirmClear === "yes"
+                  ? "border border-rose-400/40 bg-rose-500/20 text-rose-200"
+                  : "border border-rose-400/20 bg-rose-500/10 text-rose-300 hover:border-rose-400/30 hover:text-rose-200",
+              ].join(" ")}
+            >
+              {confirmClear === "yes" ? "Click again to confirm" : "Clear training data"}
+            </button>
+          </div>
+          <p className="mt-1 text-[10px] text-zinc-600 small-print">
+            This resets training jobs, examples, and pool state. Are you sure?
+          </p>
+        </div>
         <div className="mt-3 space-y-2">
           {nodes.map((n) => (
             <div
@@ -233,10 +342,27 @@ export default function AdminTab({ online }: { online: boolean }) {
                   {n.client_version ? ` · v${n.client_version}` : ""}
                 </div>
               </div>
-              <div className="text-right text-[12px]">
-                <div className={n.stale ? "text-zinc-600" : "text-emerald-300"}>
-                  {n.stale ? "Offline" : n.accepting_jobs ? "Contributing" : "Online"}
+              <div className="flex items-center gap-2">
+                <div className="text-right text-[12px]">
+                  <div className={n.stale ? "text-zinc-600" : "text-emerald-300"}>
+                    {n.stale ? "Offline" : n.accepting_jobs ? "Contributing" : "Online"}
+                  </div>
                 </div>
+                {!n.stale && n.status !== "disabled" && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void handleDisableNode(n.id)}
+                    className={[
+                      "rounded-lg px-2 py-1 text-[11px] transition disabled:opacity-50",
+                      confirmDisable === n.id
+                        ? "border border-rose-400/40 bg-rose-500/20 text-rose-200"
+                        : "border border-white/[0.08] bg-white/[0.03] text-zinc-500 hover:border-rose-400/30 hover:text-rose-300",
+                    ].join(" ")}
+                  >
+                    {confirmDisable === n.id ? "Confirm" : "Disable"}
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -245,6 +371,59 @@ export default function AdminTab({ online }: { online: boolean }) {
           )}
         </div>
       </div>
+
+      {/* User Management - Owner only */}
+      {data?.role === "owner" && (
+        <div className="mt-4 rounded-2xl border border-white/[0.06] bg-[#0a0a0c]/90 p-4">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Users</div>
+            <button
+              type="button"
+              onClick={() => void loadUsers()}
+              disabled={usersLoading}
+              className="rounded-lg border border-white/[0.08] px-2 py-1 text-[10px] text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
+            >
+              {usersLoading ? "Loading..." : "Refresh"}
+            </button>
+          </div>
+          <div className="mt-3 space-y-2">
+            {users.map((u) => (
+              <div
+                key={u.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/[0.05] bg-black/30 px-3 py-2.5"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-[13px] font-medium text-zinc-100">
+                    {u.email || u.name || "Unknown"}
+                  </div>
+                  <div className="text-[11px] text-zinc-500">
+                    {u.provider} · {u.role}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={u.role}
+                    onChange={(e) => void updateRole(u.id, e.target.value)}
+                    disabled={roleBusy === u.id || u.id === data?.currentUserId}
+                    className="rounded-lg border border-white/[0.08] bg-black/50 px-2 py-1 text-[11px] text-zinc-300 disabled:opacity-50 focus:border-violet-400/30 focus:outline-none"
+                  >
+                    <option value="user">user</option>
+                    <option value="trusted">trusted</option>
+                    <option value="admin">admin</option>
+                    <option value="owner">owner</option>
+                  </select>
+                </div>
+              </div>
+            ))}
+            {users.length === 0 && !usersLoading && (
+              <div className="py-6 text-center text-[13px] text-zinc-600">No users found.</div>
+            )}
+          </div>
+          <p className="mt-2 text-[10px] text-zinc-600">
+            Role changes take effect on next login. Owners can promote or demote any user.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

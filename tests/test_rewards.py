@@ -60,13 +60,16 @@ class MemoryRefusalRegression(unittest.TestCase):
         text = src.read_text(encoding="utf-8")
         self.assertNotIn("I do not have that in memory yet. Add it in Memory, then train", text)
 
-    def test_lightweight_not_memory_gate(self):
-        from doof.brain import lightweight_answer
-        a = lightweight_answer("What is 7 times 8?")
+    def test_math_computation(self):
+        from doof.brain import math_answer
+        a = math_answer("What is 7 times 8?")
         self.assertEqual(a.strip(), "56")
-        b = lightweight_answer("Who are you?")
-        self.assertIn("DOOF", b)
-        self.assertNotIn("Add it in Memory, then train", b)
+
+    def test_memory_retrieval(self):
+        from doof.brain import memory_answer
+        memories = [{"content": "User likes dark mode", "id": "m1"}]
+        b = memory_answer("What do I like?", memories)
+        self.assertIn("dark mode", b.lower())
 
 
 if __name__ == "__main__":

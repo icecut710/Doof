@@ -1,3 +1,3 @@
-from .transformer import DOOFTransformer
+from .transformer import DOOFTransformer, RotaryEmbedding
 
-__all__ = ["DOOFTransformer"]
+__all__ = ["DOOFTransformer", "RotaryEmbedding"]

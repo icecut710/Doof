@@ -85,7 +85,7 @@ def _builtin_registry() -> list[ModelInfo]:
     return [
         ModelInfo(
             model_id="doof-base",
-            version="0.3.0",
+            version="3.0.0",
             label="DOOF Base",
             format="doof-pt",
             size_bytes=size,
@@ -306,3 +306,172 @@ def resolve_active_model() -> ModelInfo:
     pool = preferred or models or _builtin_registry()
     pool.sort(key=lambda m: m.version, reverse=True)
     return ensure_model(pool[0].model_id, pool[0].version)
+
+
+def upload_checkpoint(
+    source_path: Path,
+    model_id: str,
+    version: str,
+    *,
+    label: str = "",
+    channel: str = "stable",
+    notes: str = "",
+    upload_to_cloud: bool = False,
+) -> ModelInfo:
+    """Stage a local checkpoint into the model cache and register it.
+
+    Verifies the file exists, computes SHA-256, copies to cache dir,
+    and writes a sidecar metadata file. Returns the registered ModelInfo.
+
+    If *upload_to_cloud* is True and Supabase is configured, the .pt file
+    is uploaded to Supabase Storage and the download_url is set on the
+    registry row so other nodes can pull the model.
+    """
+    source_path = Path(source_path)
+    if not source_path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {source_path}")
+
+    h = hashlib.sha256()
+    with source_path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    sha = h.hexdigest()
+
+    dest = local_path(model_id, version)
+    if dest != source_path:
+        import shutil
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, dest)
+
+    download_url = ""
+    if upload_to_cloud:
+        try:
+            from database import get_db
+            db = get_db()
+            if hasattr(db, "upload_model_blob"):
+                download_url = db.upload_model_blob(model_id, version, str(dest), sha)
+        except Exception:
+            pass
+
+    model = ModelInfo(
+        model_id=model_id,
+        version=version,
+        label=label or f"{model_id} {version}",
+        size_bytes=dest.stat().st_size,
+        sha256=sha,
+        download_url=download_url,
+        channel=channel,
+        status="candidate",
+        notes=notes,
+        local_path=str(dest),
+        installed=True,
+        verified=True,
+    )
+    meta = dest.with_suffix(".json")
+    meta.write_text(json.dumps(model.as_dict(), indent=2), encoding="utf-8")
+
+    try:
+        from database import get_db
+        db = get_db()
+        if hasattr(db, "insert_model"):
+            db.insert_model(model.as_dict())
+    except Exception:
+        pass
+
+    return model
+
+
+def rollback_model(model_id: str, target_version: str | None = None) -> ModelInfo:
+    """Revert to a previous approved checkpoint.
+
+    If target_version is given, roll back to that specific version.
+    Otherwise rolls back to the most recent approved version before
+    the current production model.
+    """
+    models = list_registry()
+    approved = [m for m in models if m.model_id == model_id and m.status == "approved" and m.installed]
+    approved.sort(key=lambda m: m.version, reverse=True)
+
+    if target_version:
+        target = next((m for m in approved if m.version == target_version), None)
+        if not target:
+            raise FileNotFoundError(
+                f"No installed approved checkpoint {model_id}@{target_version}"
+            )
+        return target
+
+    if len(approved) < 2:
+        raise ValueError("No previous checkpoint to roll back to")
+
+    return approved[1]
+
+
+def sync_model_from_remote(
+    model_id: str,
+    version: str,
+    download_url: str,
+    sha256: str,
+    *,
+    auto_apply: bool = False,
+) -> ModelInfo:
+    """Download a remote checkpoint, verify, stage, and optionally promote.
+
+    This is the core model-synchronization entry point. It:
+    1. Downloads the checkpoint to a temp file
+    2. Verifies SHA-256
+    3. Copies to the local cache
+    4. Registers in the model registry
+    5. Optionally promotes to production (auto_apply)
+    """
+    dest = local_path(model_id, version)
+    tmp = dest.with_suffix(".part")
+
+    req = Request(
+        download_url,
+        headers={"User-Agent": "DOOF/3.0", "Accept": "application/octet-stream"},
+    )
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with urlopen(req, timeout=300) as resp, tmp.open("wb") as out:
+            while True:
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+
+        if sha256 and not verify_checksum(tmp, sha256):
+            tmp.unlink(missing_ok=True)
+            raise ValueError(
+                f"SHA-256 mismatch for {model_id}@{version}: "
+                f"expected {sha256}"
+            )
+
+        tmp.replace(dest)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    model = ModelInfo(
+        model_id=model_id,
+        version=version,
+        label=f"{model_id} {version}",
+        size_bytes=dest.stat().st_size,
+        sha256=sha256,
+        download_url=download_url,
+        status="candidate" if not auto_apply else "approved",
+        local_path=str(dest),
+        installed=True,
+        verified=True,
+    )
+    meta = dest.with_suffix(".json")
+    meta.write_text(json.dumps(model.as_dict(), indent=2), encoding="utf-8")
+
+    try:
+        from database import get_db
+        db = get_db()
+        if hasattr(db, "insert_model"):
+            db.insert_model(model.as_dict())
+    except Exception:
+        pass
+
+    return model

@@ -11,14 +11,36 @@ import { cacheGet, cacheSet, cacheAge, cacheInvalidate, dedupe } from "./cache";
 import Login from "./Login";
 import { doofAudio } from "./audio";
 import Boot from "./Boot";
+import { ToastProvider, useToast } from "./toast";
 import StatusTab from "./StatusTab";
+import UpdatesTab from "./UpdatesTab";
+import AdminTab from "./AdminTab";
+import RewardsTab from "./RewardsTab";
 import { friendlyError } from "./errors";
+import { HondaCivicDrive, TrainingCompleteEgg, WalmartWatchToast, MassageChairEgg } from "./easter-egg-components";
+import { preloadEasterEggAssets } from "./easter-egg-assets";
+import { sidebarFooter, sidebarDetail } from "./personality";
+import { NotificationProvider, useNotifications, jokeForChange } from "./NotificationContext";
+import NotificationToast from "./NotificationToast";
+
+/* =========================================================
+   RESOURCE PRESETS
+   ========================================================= */
+
+const RESOURCE_PRESETS = {
+  light: { label: "Light", desc: "Low resource. Keeps your machine usable." },
+  balanced: { label: "Balanced", desc: "Moderate resource use. Good for most tasks." },
+  performance: { label: "Performance", desc: "Higher resource use. Faster training." },
+  max: { label: "Hit Mom's Blunt", desc: "Maximum permitted performance. Still obeys safety limits." },
+} as const;
+
+type ResourcePreset = keyof typeof RESOURCE_PRESETS;
 
 /* =========================================================
    TYPES
    ========================================================= */
 
-type Page = "chat" | "memory" | "training" | "status" | "models" | "settings";
+type Page = "chat" | "memory" | "training" | "network" | "status" | "models" | "settings" | "updates" | "admin" | "rewards" | "feedback" | "teach";
 
 type Msg = {
   id: string;
@@ -29,6 +51,7 @@ type Msg = {
   feedback?: "good" | "bad" | null;
   correcting?: boolean;
   correction?: string;
+  source?: string;
 };
 
 type MemoryItem = {
@@ -40,6 +63,7 @@ type MemoryItem = {
   created_at: string;
   usage_count: number;
   approved: boolean;
+  training_status?: string;
   tags?: string[];
   score?: number;
 };
@@ -58,6 +82,20 @@ type TrainingQueueItem = {
   created_at: string;
   payload: Record<string, unknown>;
   assigned_worker: string | null;
+};
+
+type TrainingJobItem = {
+  id: string;
+  type: string;
+  status: string;
+  worker: string | null;
+  created_at: string;
+  finished_at: string | null;
+  error: string | null;
+  step: number | null;
+  epoch: number | null;
+  total_epochs: number | null;
+  loss: number | null;
 };
 
 type RunningJob = {
@@ -204,9 +242,10 @@ function GlassPanel({
       className={[
         "rounded-2xl border border-white/[0.055]",
         "bg-[#09090b]/90 backdrop-blur-sm",
+        "transition-all duration-300",
         glow
-          ? "shadow-[0_0_0_1px_rgba(139,92,246,0.08),0_8px_30px_rgba(0,0,0,0.22),0_0_40px_rgba(139,92,246,0.04)]"
-          : "shadow-[0_8px_30px_rgba(0,0,0,0.18)]",
+          ? "shadow-[0_0_0_1px_rgba(139,92,246,0.12),0_8px_30px_rgba(0,0,0,0.22),0_0_50px_rgba(139,92,246,0.06)] hover:shadow-[0_0_0_1px_rgba(139,92,246,0.2),0_8px_30px_rgba(0,0,0,0.22),0_0_60px_rgba(139,92,246,0.12)]"
+          : "shadow-[0_8px_30px_rgba(0,0,0,0.18)] hover:shadow-[0_0_24px_rgba(139,92,246,0.08),0_8px_32px_rgba(0,0,0,0.22)] hover:border-white/[0.08]",
         className,
       ].join(" ")}
     >
@@ -233,12 +272,12 @@ function GlassButton({
 }) {
   const variantCls =
     variant === "primary"
-      ? "border-violet-400/20 bg-violet-600/80 text-white shadow-[0_4px_18px_rgba(124,58,237,0.16)] hover:bg-violet-500 hover:border-violet-300/25 hover:shadow-[0_4px_24px_rgba(124,58,237,0.28)]"
+      ? "border-violet-400/20 bg-violet-600/80 text-white shadow-[0_4px_18px_rgba(124,58,237,0.16)] hover:bg-violet-500 hover:border-violet-300/30 hover:shadow-[0_4px_28px_rgba(124,58,237,0.32)]"
       : variant === "danger"
-        ? "border-rose-500/20 bg-rose-500/[0.08] text-rose-300 hover:bg-rose-500/[0.14] hover:border-rose-400/25"
+        ? "border-rose-500/20 bg-rose-500/[0.08] text-rose-300 hover:bg-rose-500/[0.14] hover:border-rose-400/30 hover:shadow-[0_0_16px_rgba(251,113,133,0.12)]"
         : variant === "success"
-          ? "border-emerald-400/20 bg-emerald-500/[0.08] text-emerald-300 hover:bg-emerald-500/[0.14]"
-          : "border-white/[0.07] bg-white/[0.018] text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300";
+          ? "border-emerald-400/20 bg-emerald-500/[0.08] text-emerald-300 hover:bg-emerald-500/[0.14] hover:shadow-[0_0_16px_rgba(52,211,153,0.12)]"
+          : "border-white/[0.07] bg-white/[0.018] text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300 hover:shadow-[0_0_12px_rgba(139,92,246,0.08)]";
 
   const sizeCls =
     size === "sm"
@@ -311,11 +350,10 @@ function MetricCard({
   return (
     <div
       className={[
-        "rounded-xl border px-3 py-2.5",
-        "shadow-[0_4px_18px_rgba(0,0,0,0.12)]",
+        "rounded-xl border px-3 py-2.5 transition-all duration-300",
         accent
-          ? "border-violet-400/12 bg-violet-500/[0.04]"
-          : "border-white/[0.045] bg-white/[0.012]",
+          ? "border-violet-400/12 bg-violet-500/[0.04] hover:border-violet-400/20 hover:shadow-[0_0_20px_rgba(139,92,246,0.1)]"
+          : "border-white/[0.045] bg-white/[0.012] hover:border-white/[0.07] hover:shadow-[0_0_16px_rgba(139,92,246,0.06)]",
       ].join(" ")}
     >
       <div className="text-[12px] font-medium uppercase tracking-[0.14em] text-zinc-700">
@@ -342,9 +380,9 @@ function StatusDot({ on }: { on: boolean }) {
   return (
     <span
       className={[
-        "inline-block h-1.5 w-1.5 shrink-0 rounded-full",
+        "inline-block h-1.5 w-1.5 shrink-0 rounded-full transition-all duration-300",
         on
-          ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.7)]"
+          ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]"
           : "bg-zinc-700",
       ].join(" ")}
     />
@@ -400,7 +438,7 @@ const NADDAF_REMOTE =
 function NaddafAtmosphere() {
   // Bundled asset renders immediately — no network wait, no flash, no shift.
   // Once per launch, a single background attempt may adopt the canonical
-  // Supabase copy; on any failure we silently keep the bundled one.
+  // remote copy; on any failure we silently keep the bundled one.
   const [src, setSrc] = useState(NADDAF_LOCAL);
   useEffect(() => {
     let alive = true;
@@ -464,11 +502,17 @@ function NaddafAtmosphere() {
 
 const NAV_ITEMS: { id: Page; label: string; icon: string; section: string }[] = [
   { id: "chat", label: "Chat", icon: "*", section: "CHAT" },
-  { id: "memory", label: "Memory", icon: "+", section: "CHAT" },
+  { id: "teach", label: "Teach", icon: "+", section: "CHAT" },
+  { id: "memory", label: "Memory", icon: "M", section: "CHAT" },
   { id: "training", label: "Training", icon: "T", section: "CHAT" },
+  { id: "feedback", label: "Feedback", icon: "?", section: "CHAT" },
+  { id: "network", label: "Network", icon: "N", section: "HOUSE" },
   { id: "status", label: "Status", icon: "S", section: "HOUSE" },
   { id: "models", label: "Brain", icon: "B", section: "HOUSE" },
-  { id: "settings", label: "Settings", icon: "=", section: "HOUSE" },
+  { id: "updates", label: "Updates", icon: "U", section: "SYSTEM" },
+  { id: "admin", label: "Admin", icon: "A", section: "SYSTEM" },
+  { id: "rewards", label: "Rewards", icon: "R", section: "SYSTEM" },
+  { id: "settings", label: "Settings", icon: "=", section: "SYSTEM" },
 ];
 
 function Sidebar({
@@ -485,7 +529,7 @@ function Sidebar({
   trainRunning: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
-  const sections = ["CHAT", "HOUSE"];
+  const sections = ["CHAT", "HOUSE", "SYSTEM"];
   const gpuName =
     hw?.cuda_available && hw.cuda_devices[0]
       ? hw.cuda_devices[0].name
@@ -510,7 +554,7 @@ function Sidebar({
           <div className="min-w-0 flex-1">
             <div className="text-[11px] font-semibold tracking-tight text-zinc-100">DOOF</div>
             <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-700">
-              v0.2 · local
+              v3.0 · local
             </div>
           </div>
         )}
@@ -558,8 +602,8 @@ function Sidebar({
                       "mb-0.5 flex w-full items-center gap-2",
                       "rounded-xl px-2 py-1.5 text-left",
                       "text-[13px] transition-all duration-200",
-                      active
-                        ? "bg-violet-500/[0.11] text-violet-200 shadow-[inset_0_0_0_1px_rgba(139,92,246,0.18),0_0_18px_rgba(139,92,246,0.12)] doof-nav-active-beat"
+                        active
+                          ? "bg-violet-500/[0.11] text-violet-200 shadow-[inset_0_0_0_1px_rgba(139,92,246,0.22),0_0_22px_rgba(139,92,246,0.15)] doof-nav-active-beat"
                         : "text-zinc-400 hover:bg-white/[0.025] hover:text-zinc-100",
                     ].join(" ")}
                   >
@@ -588,11 +632,11 @@ function Sidebar({
         <div className="flex items-center gap-1.5">
           <StatusDot on={online} />
           <span className="text-[12px] uppercase tracking-[0.13em] text-zinc-400">
-            {online ? "Shawarmas: Fresh" : "Lost in the desert"}
+            {sidebarFooter(online)}
           </span>
         </div>
         <div className="mt-0.5 truncate text-[12px] text-zinc-500" title={gpuName}>
-          {online ? "All core services responding" : "The brain is unreachable"}
+          {sidebarDetail(online)}
         </div>
       </div>
     </aside>
@@ -602,6 +646,33 @@ function Sidebar({
 /* =========================================================
    CHAT TAB
    ========================================================= */
+
+function formatSource(data: Record<string, unknown>): string {
+  if (data.source === "memory") return "MEMORY";
+  const label = String(data.source_label || "").trim();
+  if (label) {
+    const params = data.parameters_m != null ? ` · ${data.parameters_m}M PARAMS` : "";
+    return `${label}${params}`;
+  }
+  if (data.provider === "cloud" || data.source === "cloud") return "CLOUD BRAIN";
+  if (data.node_name) return `REMOTE · ${String(data.node_name).toUpperCase()}`;
+  if (data.provider === "hosted_brain") return "HOSTED BRAIN";
+  if (data.provider === "lightweight") return "FALLBACK";
+  const provider = String(data.provider || "");
+  if (provider.includes("cuda") || provider.includes("gpu")) {
+    const params = data.parameters_m != null ? ` · ${data.parameters_m}M PARAMS` : "";
+    return `LOCAL · CUDA${params}`;
+  }
+  if (provider.includes("cpu")) {
+    const params = data.parameters_m != null ? ` · ${data.parameters_m}M PARAMS` : "";
+    return `LOCAL · CPU${params}`;
+  }
+  if (data.device) {
+    const params = data.parameters_m != null ? ` · ${data.parameters_m}M PARAMS` : "";
+    return `LOCAL · ${String(data.device).toUpperCase()}${params}`;
+  }
+  return "LOCAL";
+}
 
 function ChatTab({
   msgs,
@@ -614,6 +685,7 @@ function ChatTab({
   sett,
   inputRef,
   bottomRef,
+  setPage,
 }: {
   msgs: Msg[];
   setMsgs: React.Dispatch<React.SetStateAction<Msg[]>>;
@@ -625,6 +697,7 @@ function ChatTab({
   sett: { temperature: number; max_new_tokens: number; top_k: number };
   inputRef: React.RefObject<HTMLInputElement | null>;
   bottomRef: React.RefObject<HTMLDivElement | null>;
+  setPage: (p: Page) => void;
 }) {
   const SUGGESTIONS = [
     "What have you learned?",
@@ -650,6 +723,11 @@ function ChatTab({
       const data = await api<{
         text?: string;
         memories_used?: MemoryItem[];
+        provider?: string;
+        source?: string;
+        device?: string;
+        parameters_m?: number;
+        node_name?: string;
       }>("/api/generate", {
         method: "POST",
         body: JSON.stringify({
@@ -670,6 +748,7 @@ function ChatTab({
                 pending: false,
                 memoriesUsed: data.memories_used ?? [],
                 feedback: null,
+                source: formatSource(data as Record<string, unknown>),
               }
             : m,
         ),
@@ -800,7 +879,11 @@ function ChatTab({
                     ].join(" ")}
                   >
                     {msg.pending ? (
-                      <span className="doof-pulse inline-block">···</span>
+                      <span className="flex h-4 items-center gap-1">
+                        <span className="doof-typing-dot" style={{ animationDelay: "0ms" }} />
+                        <span className="doof-typing-dot" style={{ animationDelay: "160ms" }} />
+                        <span className="doof-typing-dot" style={{ animationDelay: "320ms" }} />
+                      </span>
                     ) : (
                       msg.text
                     )}
@@ -815,16 +898,26 @@ function ChatTab({
                         {msg.memoriesUsed.slice(0, 3).map((m) => (
                           <span
                             key={m.id}
-                            className="rounded-full border border-violet-400/10 bg-violet-500/[0.04] px-1.5 py-0.5 text-[11px] text-violet-400/60"
-                            title={m.content}
+                            className="cursor-pointer rounded-full border border-violet-400/10 bg-violet-500/[0.04] px-1.5 py-0.5 text-[11px] text-violet-400/60 transition hover:border-violet-400/20 hover:bg-violet-500/[0.08] hover:text-violet-300/80"
+                            title={`${m.content}\n\nClick to view in Memory tab`}
+                            onClick={() => setPage("memory")}
                           >
-                            ✓ {m.content.slice(0, 28)}…
+                          ✓ {m.content.slice(0, 28)}…
                           </span>
                         ))}
                       </div>
                     )}
 
-                  {/* Feedback buttons */}
+                    {/* Source indicator */}
+                    {msg.role === "doof" && !msg.pending && msg.source && (
+                      <div className="mt-1">
+                        <span className="inline-flex items-center rounded-full border border-white/[0.04] bg-white/[0.015] px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-zinc-600">
+                          {msg.source}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Feedback buttons */}
                   {msg.role === "doof" && !msg.pending && msg.feedback === null && (
                     <div className="mt-1 flex gap-1">
                       <button
@@ -955,8 +1048,13 @@ function MemoryTab({ online }: { online: boolean }) {
   const [loading, setLoading] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [newContent, setNewContent] = useState("");
-  const [newImportance, setNewImportance] = useState<"low" | "medium" | "high">("medium");
-  const [newCategory, setNewCategory] = useState("general");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editContent, setEditContent] = useState("");
+  const [editImportance, setEditImportance] = useState<"low" | "medium" | "high">("medium");
+  const [editCategory, setEditCategory] = useState("general");
+  const [editTags, setEditTags] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async () => {
     if (!online) return;
@@ -975,22 +1073,144 @@ function MemoryTab({ online }: { online: boolean }) {
   const filtered = useMemo(() => {
     const q = query.toLowerCase();
     return q
-      ? memories.filter((m) => m.content.toLowerCase().includes(q) || m.category.toLowerCase().includes(q))
+      ? memories.filter((m) =>
+          m.content.toLowerCase().includes(q) ||
+          m.category.toLowerCase().includes(q) ||
+          (m.tags ?? []).some((t) => t.toLowerCase().includes(q))
+        )
       : memories;
   }, [memories, query]);
 
-  const addMemory = async () => {
+  const handleSearch = (val: string) => {
+    setQuery(val);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      if (val.trim()) {
+        void apiCached<{ memories: MemoryItem[] }>(`/api/memory/search?q=${encodeURIComponent(val.trim())}`, 5000)
+          .then((d) => { if (d.memories) setMemories(d.memories); })
+          .catch(() => {});
+      } else {
+        void load();
+      }
+    }, 300);
+  };
+
+  /* ---- Teach DOOF: clean/validate pasted or imported text ---- */
+  const cleanTeachItems = (raw: string): string[] => {
+    const seen = new Set<string>();
+    const items: string[] = [];
+    for (const line of raw.split(/\n+/)) {
+      const t = line.replace(/\s+/g, " ").trim();
+      if (t.length < 4) continue;               // too short to be useful
+      if (/^[-*=#>|_]{3,}$/.test(t)) continue;  // separator / decoration junk
+      const key = t.toLowerCase();
+      if (seen.has(key)) continue;              // dedupe
+      seen.add(key);
+      items.push(t.slice(0, 600));
+      if (items.length >= 100) break;           // sane cap per batch
+    }
+    return items;
+  };
+
+  const teachBusy = useState<"memory" | "permanent" | null>(null);
+  const teachSetBusy = teachBusy[1];
+  const [teachFileCount, setTeachFileCount] = useState(0);
+  const teachToast = useToast();
+
+  const importTeachFile = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result ?? "");
+      setNewContent((cur) => (cur ? cur + "\n" : "") + text);
+      setTeachFileCount(cleanTeachItems(text).length);
+      teachToast("success", `Loaded "${file.name}" — ${cleanTeachItems(text).length} pieces of knowledge found.`);
+    };
+    reader.onerror = () => teachToast("error", `Could not read "${file.name}".`);
+    reader.readAsText(file);
+  };
+
+  const saveMemoriesFromTeach = async (): Promise<string[]> => {
+    const items = cleanTeachItems(newContent);
+    const ids: string[] = [];
+    for (const item of items) {
+      try {
+        const res = await api<{ memory?: { id?: string } }>("/api/memory", {
+          method: "POST",
+          body: JSON.stringify({
+            content: item,
+            importance: "medium",
+            category: "taught",
+            tags: ["taught"],
+          }),
+        });
+        if (res?.memory?.id) ids.push(res.memory.id);
+      } catch { /* keep going — partial saves are still useful */ }
+    }
+    return ids;
+  };
+
+  const teachSave = async (mode: "memory" | "permanent") => {
     if (!newContent.trim()) return;
-    await api("/api/memory", {
-      method: "POST",
+    teachSetBusy(mode);
+    try {
+      const ids = await saveMemoriesFromTeach();
+      cacheInvalidate("/api/memory");
+      void load();
+      if (ids.length === 0) {
+        teachToast("error", "Nothing saved. Check that the server is running.");
+        return;
+      }
+      if (mode === "memory") {
+        teachToast("success", `${ids.length} memories saved — DOOF can look them up right now.`);
+        setShowAdd(false);
+        setNewContent("");
+        setTeachFileCount(0);
+        return;
+      }
+      // Teach permanently: promote each memory into the training dataset.
+      let promoted = 0;
+      for (const id of ids) {
+        try {
+          await api(`/api/memory/${id}/promote`, { method: "POST", body: "{}" });
+          promoted++;
+        } catch { /* skip failures */ }
+      }
+      cacheInvalidate("/api/memory");
+      void load();
+      teachToast(
+        "success",
+        `${promoted}/${ids.length} added to training data — DOOF learns them for good on the next training run.`,
+      );
+      setShowAdd(false);
+      setNewContent("");
+      setTeachFileCount(0);
+    } finally {
+      teachSetBusy(null);
+    }
+  };
+
+  const teachPreviewCount = useMemo(() => cleanTeachItems(newContent).length, [newContent]);
+
+  const startEdit = (mem: MemoryItem) => {
+    setEditingId(mem.id);
+    setEditContent(mem.content);
+    setEditImportance(mem.importance);
+    setEditCategory(mem.category);
+    setEditTags((mem.tags ?? []).join(", "));
+  };
+
+  const saveEdit = async () => {
+    if (!editingId || !editContent.trim()) return;
+    await api(`/api/memory/${editingId}`, {
+      method: "PUT",
       body: JSON.stringify({
-        content: newContent.trim(),
-        importance: newImportance,
-        category: newCategory || "general",
+        content: editContent.trim(),
+        importance: editImportance,
+        category: editCategory || "general",
+        tags: editTags.split(",").map((t) => t.trim()).filter(Boolean),
       }),
     });
-    setNewContent("");
-    setShowAdd(false);
+    setEditingId(null);
     cacheInvalidate("/api/memory");
     void load();
   };
@@ -1000,6 +1220,38 @@ function MemoryTab({ online }: { online: boolean }) {
     cacheInvalidate("/api/memory");
     setMemories((m) => m.filter((x) => x.id !== id));
     setStats((s) => ({ ...s, total: s.total - 1, approved: s.approved - 1 }));
+    setConfirmDeleteId(null);
+  };
+
+  const [promotingId, setPromotingId] = useState<string | null>(null);
+  const toast = useToast();
+
+  const promoteMemory = async (mem: MemoryItem) => {
+    if (mem.training_status === "promoted") {
+      toast("info", "Already added to training data.");
+      return;
+    }
+    setPromotingId(mem.id);
+    try {
+      const res = await api<{ ok?: boolean; already?: boolean }>(
+        `/api/memory/${mem.id}/promote`,
+        {
+          method: "POST",
+          body: JSON.stringify({ prompt: `Remember this: ${mem.content.slice(0, 120)}` }),
+        },
+      );
+      if (res?.already) {
+        toast("info", "Already added to training data.");
+      } else {
+        toast("success", "Added to training data — DOOF will learn from this next training run.");
+      }
+    } catch {
+      toast("error", "Could not add to training data. Is the server running?");
+    } finally {
+      setPromotingId(null);
+      cacheInvalidate("/api/memory");
+      void load();
+    }
   };
 
   const importanceBadge = (imp: string) => {
@@ -1017,6 +1269,10 @@ function MemoryTab({ online }: { online: boolean }) {
             EVERYTHING DOOF REMEMBERS · FOREVER
           </div>
           <div className="mt-1 text-[13px] font-semibold text-zinc-100">MEMORY</div>
+          <div className="mt-0.5 text-[12px] leading-relaxed text-zinc-500">
+            Saved facts DOOF can retrieve during conversations.
+            <span className="text-zinc-600"> This does not change how DOOF thinks — for that, use Training.</span>
+          </div>
         </div>
       </div>
 
@@ -1032,8 +1288,8 @@ function MemoryTab({ online }: { online: boolean }) {
       <div className="flex items-center gap-2">
         <input
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search memories…"
+          onChange={(e) => handleSearch(e.target.value)}
+          placeholder="Search memories, tags, categories…"
           className="flex-1 rounded-xl border border-white/[0.055] bg-[#080809] px-3 py-1.5 text-[10px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-violet-500/20"
         />
         <GlassButton onClick={() => setShowAdd(!showAdd)}>
@@ -1044,23 +1300,88 @@ function MemoryTab({ online }: { online: boolean }) {
         </GlassButton>
       </div>
 
-      {/* Add form */}
+      {/* Teach DOOF panel */}
       {showAdd && (
         <GlassPanel className="p-3" glow>
-          <div className="mb-2 text-[12px] uppercase tracking-[0.15em] text-zinc-700">
-            New Memory
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-[12px] uppercase tracking-[0.15em] text-zinc-700">
+              Teach DOOF
+            </div>
+            <label className="cursor-pointer rounded-lg border border-white/[0.07] bg-white/[0.02] px-2 py-1 text-[11px] text-zinc-400 transition hover:border-violet-400/25 hover:text-violet-200">
+              📄 Import file (.txt / .md)
+              <input
+                type="file"
+                accept=".txt,.md,.text,text/plain"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  Array.from(e.target.files ?? []).forEach(importTeachFile);
+                  e.target.value = "";
+                }}
+              />
+            </label>
           </div>
           <textarea
             value={newContent}
             onChange={(e) => setNewContent(e.target.value)}
+            rows={6}
+            placeholder={"Type or paste anything DOOF should know — one fact per line, or dump a whole document and DOOF will tidy it up.\n\n\"Kareem's Honda Civic is green.\""}
+            className="w-full resize-y rounded-xl border border-white/[0.05] bg-black/40 p-2.5 text-[11px] leading-relaxed text-zinc-300 outline-none placeholder:text-zinc-800 focus:border-violet-500/20"
+          />
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-600">
+            {teachPreviewCount > 0 ? (
+              <span>
+                <span className="text-emerald-300">{teachPreviewCount}</span> piece{teachPreviewCount === 1 ? "" : "s"} of knowledge detected (cleaned &amp; deduped automatically)
+              </span>
+            ) : (
+              <span>Paste knowledge above, or import a file. One line = one thing DOOF remembers.</span>
+            )}
+            {teachFileCount > 0 && (
+              <button type="button" className="text-violet-300/70 hover:text-violet-200" onClick={() => { setTeachFileCount(0); }}>
+                file loaded ✓
+              </button>
+            )}
+          </div>
+          <div className="mt-2.5 flex flex-wrap items-end justify-end gap-2">
+            <GlassButton
+              size="sm"
+              variant="ghost"
+              disabled={teachBusy[0] !== null}
+              onClick={() => void teachSave("memory")}
+            >
+              {teachBusy[0] === "memory" ? "Saving…" : "Save to Memory"}
+            </GlassButton>
+            <GlassButton
+              size="sm"
+              disabled={teachBusy[0] !== null}
+              onClick={() => void teachSave("permanent")}
+            >
+              {teachBusy[0] === "permanent" ? "Teaching…" : "Teach Permanently ⭐"}
+            </GlassButton>
+          </div>
+          <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
+            <span className="text-zinc-500">Save to Memory</span> → DOOF can look it up right now.
+            <span className="text-zinc-500"> Teach Permanently</span> → also goes into training data so DOOF learns it for good (slower, changes how it answers).
+          </p>
+        </GlassPanel>
+      )}
+
+      {/* Edit modal */}
+      {editingId && (
+        <GlassPanel className="p-3" glow>
+          <div className="mb-2 text-[12px] uppercase tracking-[0.15em] text-zinc-700">
+            Edit Memory
+          </div>
+          <textarea
+            value={editContent}
+            onChange={(e) => setEditContent(e.target.value)}
             rows={2}
-            placeholder="Enter memory content…"
             className="w-full resize-none rounded-xl border border-white/[0.05] bg-black/40 p-2 text-[10px] text-zinc-300 outline-none placeholder:text-zinc-800 focus:border-violet-500/20"
           />
           <div className="mt-2 flex items-center gap-2">
             <select
-              value={newImportance}
-              onChange={(e) => setNewImportance(e.target.value as "low" | "medium" | "high")}
+              value={editImportance}
+              onChange={(e) => setEditImportance(e.target.value as "low" | "medium" | "high")}
               className="rounded-lg border border-white/[0.05] bg-black/50 px-2 py-1 text-[12px] text-zinc-400 outline-none"
             >
               <option value="low">Low importance</option>
@@ -1068,13 +1389,35 @@ function MemoryTab({ online }: { online: boolean }) {
               <option value="high">High importance</option>
             </select>
             <input
-              value={newCategory}
-              onChange={(e) => setNewCategory(e.target.value)}
+              value={editCategory}
+              onChange={(e) => setEditCategory(e.target.value)}
               placeholder="Category"
               className="flex-1 rounded-lg border border-white/[0.05] bg-black/50 px-2 py-1 text-[12px] text-zinc-400 outline-none placeholder:text-zinc-800 focus:border-violet-500/20"
             />
-            <GlassButton size="sm" onClick={() => void addMemory()}>
-              Save
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <input
+              value={editTags}
+              onChange={(e) => setEditTags(e.target.value)}
+              placeholder="Tags (comma-separated)"
+              className="flex-1 rounded-lg border border-white/[0.05] bg-black/50 px-2 py-1 text-[12px] text-zinc-400 outline-none placeholder:text-zinc-800 focus:border-violet-500/20"
+            />
+            <GlassButton size="sm" onClick={() => void saveEdit()}>Save</GlassButton>
+            <GlassButton size="sm" variant="ghost" onClick={() => setEditingId(null)}>Cancel</GlassButton>
+          </div>
+        </GlassPanel>
+      )}
+
+      {/* Delete confirmation */}
+      {confirmDeleteId && (
+        <GlassPanel className="p-3 border-rose-400/20" glow>
+          <div className="text-[11px] text-zinc-300 mb-2">Delete this memory permanently?</div>
+          <div className="flex items-center gap-2">
+            <GlassButton size="sm" variant="danger" onClick={() => void deleteMemory(confirmDeleteId)}>
+              Delete
+            </GlassButton>
+            <GlassButton size="sm" variant="ghost" onClick={() => setConfirmDeleteId(null)}>
+              Cancel
             </GlassButton>
           </div>
         </GlassPanel>
@@ -1098,6 +1441,15 @@ function MemoryTab({ online }: { online: boolean }) {
             >
               <div className="min-w-0 flex-1">
                 <div className="text-[10px] leading-snug text-zinc-300">{mem.content}</div>
+                {(mem.tags ?? []).length > 0 && (
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {mem.tags!.map((t) => (
+                      <span key={t} className="rounded-full border border-violet-400/10 bg-violet-500/[0.04] px-1.5 py-0.5 text-[9px] text-violet-400/50">
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <div className="mt-1 flex items-center gap-2 text-[12px] text-zinc-700">
                   <span>{mem.category}</span>
                   <span>·</span>
@@ -1112,53 +1464,31 @@ function MemoryTab({ online }: { online: boolean }) {
                   <button
                     type="button"
                     title="Edit memory"
-                    onClick={() => {
-                      const next = window.prompt("Edit memory", mem.content);
-                      if (!next || next.trim() === mem.content) return;
-                      void (async () => {
-                        try {
-                          await api(`/api/memory/${mem.id}`, { method: "DELETE" });
-                          await api("/api/memory", {
-                            method: "POST",
-                            body: JSON.stringify({
-                              content: next.trim(),
-                              importance: mem.importance,
-                              category: mem.category,
-                              created_by: mem.created_by,
-                            }),
-                          });
-                          void load();
-                        } catch { /* ignore */ }
-                      })();
-                    }}
+                    onClick={() => startEdit(mem)}
                     className="text-[12px] text-zinc-800 transition hover:text-violet-300"
                   >
                     Edit
                   </button>
+                  {mem.training_status === "promoted" ? (
+                    <span className="text-[12px] text-emerald-400/60">In training data</span>
+                  ) : (
+                    <button
+                      type="button"
+                      title="Add to the training dataset so DOOF learns this permanently"
+                      disabled={promotingId === mem.id}
+                      onClick={() => void promoteMemory(mem)}
+                      className={`text-[12px] transition ${
+                        promotingId === mem.id
+                          ? "animate-pulse text-emerald-300"
+                          : "text-zinc-800 hover:text-emerald-400"
+                      }`}
+                    >
+                      {promotingId === mem.id ? "Adding…" : "Promote"}
+                    </button>
+                  )}
                   <button
                     type="button"
-                    title="Promote to training dataset"
-                    onClick={() =>
-                      void api("/api/approved_examples", {
-                        method: "POST",
-                        body: JSON.stringify({
-                          prompt: "What do you know about this?",
-                          response: mem.content,
-                          source: "memory",
-                          approved: true,
-                        }),
-                      })
-                        .then(() => cacheInvalidate("/api/approved_examples"))
-                        .then(() => void load())
-                        .catch(() => {})
-                    }
-                    className="text-[12px] text-zinc-800 transition hover:text-emerald-400"
-                  >
-                    Promote to training
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void deleteMemory(mem.id)}
+                    onClick={() => setConfirmDeleteId(mem.id)}
                     className="text-[12px] text-zinc-800 transition hover:text-rose-400"
                   >
                     Delete
@@ -1200,6 +1530,22 @@ function TrainingTab({ online }: { online: boolean }) {
     online_nodes: [],
   });
 
+  // Track training completion for easter-egg surprise
+  const [showTrainingEgg, setShowTrainingEgg] = useState(false);
+  const wasRunning = useRef(false);
+  const { push: notify } = useNotifications();
+
+  useEffect(() => {
+    if (wasRunning.current && !train.running && train.step > 0) {
+      // Training just completed — show easter egg + notification
+      setShowTrainingEgg(true);
+      notify(jokeForChange("training"), "Training complete", "change");
+      const t = setTimeout(() => setShowTrainingEgg(false), 6000);
+      return () => clearTimeout(t);
+    }
+    wasRunning.current = train.running;
+  }, [train.running, train.step, notify]);
+
   const refresh = useCallback(async () => {
     if (!online) return;
     try {
@@ -1217,18 +1563,27 @@ function TrainingTab({ online }: { online: boolean }) {
   }, [online, refresh]);
 
   const [showLogs, setShowLogs] = useState(false);
-  const [jobs, setJobs] = useState<{ id: string; status: string; created_at: string; worker: string | null }[]>([]);
+  const [showJobHistory, setShowJobHistory] = useState(false);
+  const [showFinishedJobs, setShowFinishedJobs] = useState(false);
+  const [showUpload, setShowUpload] = useState(false);
+  const [uploadText, setUploadText] = useState("");
+  const [jobs, setJobs] = useState<TrainingJobItem[]>([]);
 
   const loadJobs = useCallback(async () => {
     if (!online) return;
     try {
-      const data = await api<typeof jobs>("/api/training/jobs");
-      setJobs(Array.isArray(data) ? data : []);
+      const data = await api<TrainingJobItem[] | { jobs: TrainingJobItem[] }>("/api/training/jobs");
+      const list = Array.isArray(data) ? data : (data.jobs ?? []);
+      setJobs(list);
     } catch { /* ignore */ }
   }, [online]);
 
   useEffect(() => {
-    if (showLogs) void loadJobs();
+    if (showLogs) {
+      void loadJobs();
+      const t = setInterval(() => void loadJobs(), 4000);
+      return () => clearInterval(t);
+    }
   }, [showLogs, loadJobs]);
 
   const startTrain = async () => {
@@ -1238,6 +1593,22 @@ function TrainingTab({ online }: { online: boolean }) {
 
   const stopTrain = async () => {
     await api("/api/training/stop", { method: "POST", body: JSON.stringify({}) });
+  };
+
+  const cancelJob = async (jobId: string) => {
+    try {
+      await api(`/api/training/jobs/${jobId}/cancel`, { method: "POST", body: JSON.stringify({}) });
+      void loadJobs();
+      void refresh();
+    } catch { /* ignore */ }
+  };
+
+  const retryJob = async (jobId: string) => {
+    try {
+      await api(`/api/training/jobs/${jobId}/retry`, { method: "POST", body: JSON.stringify({}) });
+      void loadJobs();
+      void refresh();
+    } catch { /* ignore */ }
   };
 
   const buildDataset = async () => {
@@ -1256,6 +1627,23 @@ function TrainingTab({ online }: { online: boolean }) {
       : `${train.eta_seconds}s`
     : null;
 
+  const jobStatusTone = (status: string) => {
+    if (status === "done" || status === "completed") return "online" as const;
+    if (status === "running" || status === "in_progress") return "violet" as const;
+    if (status === "failed" || status === "error") return "danger" as const;
+    if (status === "cancelled") return "warning" as const;
+    return "neutral" as const;
+  };
+
+  const jobStatusLabel = (status: string) => {
+    if (status === "done" || status === "completed") return "Done";
+    if (status === "running" || status === "in_progress") return "Running";
+    if (status === "failed" || status === "error") return "Failed";
+    if (status === "cancelled") return "Cancelled";
+    if (status === "queued" || status === "pending") return "Queued";
+    return status;
+  };
+
   return (
     <div className="flex-1 overflow-y-auto p-4">
       {/* Header */}
@@ -1271,6 +1659,10 @@ function TrainingTab({ online }: { online: boolean }) {
             <StatusBadge tone={train.running ? "violet" : "neutral"}>
               {train.running ? "● DOOF IS TRAINING" : "READY TO LEARN"}
             </StatusBadge>
+          </div>
+          <div className="mt-0.5 max-w-md text-[12px] leading-relaxed text-zinc-500">
+            Training updates the brain&apos;s weights using approved examples.
+            <span className="text-zinc-600"> Unlike Memory, this permanently changes how DOOF thinks.</span>
           </div>
         </div>
         <div className="text-right">
@@ -1373,9 +1765,9 @@ function TrainingTab({ online }: { online: boolean }) {
         </GlassPanel>
       )}
 
-      {/* Running jobs */}
+      {/* Running jobs (live progress) */}
       {train.running_jobs && train.running_jobs.length > 0 && (
-        <GlassPanel className="mb-3 p-3">
+        <GlassPanel className="mb-3 p-3" glow>
           <div className="mb-1.5 text-[12px] uppercase tracking-[0.12em] text-zinc-700">
             Running Jobs ({train.running_jobs.length})
           </div>
@@ -1385,12 +1777,18 @@ function TrainingTab({ online }: { online: boolean }) {
                 key={job.id}
                 className="flex items-center justify-between rounded-lg border border-white/[0.04] bg-black/30 px-2.5 py-1.5"
               >
-                <div className="text-[12px] text-zinc-300">Job {job.id.slice(0, 8)}…</div>
+                <div className="flex items-center gap-2 text-[12px]">
+                  <StatusBadge tone="violet">Running</StatusBadge>
+                  <span className="text-zinc-400 font-mono text-[11px]">{job.id.slice(0, 8)}…</span>
+                  {job.worker && <span className="text-zinc-600">on {job.worker}</span>}
+                </div>
                 <div className="flex items-center gap-3 text-[12px] text-zinc-600">
-                  {job.epoch != null && <span>Epoch {job.epoch}</span>}
-                  {job.total_epochs != null && <span>/ {job.total_epochs}</span>}
+                  {job.epoch != null && <span>Epoch {job.epoch}{job.total_epochs != null ? `/${job.total_epochs}` : ""}</span>}
                   {job.step != null && <span>Step {job.step}</span>}
                   {job.loss != null && <span className="text-violet-300">Loss {Number(job.loss).toFixed(4)}</span>}
+                  <GlassButton size="sm" variant="danger" onClick={() => void cancelJob(job.id)}>
+                    Cancel
+                  </GlassButton>
                 </div>
               </div>
             ))}
@@ -1419,46 +1817,144 @@ function TrainingTab({ online }: { online: boolean }) {
         </GlassButton>
         <GlassButton
           variant="ghost"
-          onClick={() => {
-            const text = window.prompt("Knowledge to teach DOOF (permanent):");
-            if (!text?.trim()) return;
-            void api("/api/knowledge", {
-              method: "POST",
-              body: JSON.stringify({ text: text.trim(), source: "upload" }),
-            }).then(() => void refresh()).catch(() => {});
-          }}
+          onClick={() => setShowUpload(!showUpload)}
           disabled={!online}
         >
-          Upload Knowledge
+          {showUpload ? "Cancel" : "Upload Knowledge"}
         </GlassButton>
         <GlassButton
           variant="ghost"
           onClick={() => setShowLogs(!showLogs)}
           disabled={!online}
         >
-          {showLogs ? "Hide Logs" : "View Logs"}
+          {showLogs ? "Hide Jobs" : "View Jobs"}
         </GlassButton>
       </div>
 
-      {/* Job logs */}
-      {showLogs && (
-        <GlassPanel className="mb-3 p-3">
-          <div className="mb-1.5 text-[12px] uppercase tracking-[0.15em] text-zinc-700">
-            Training Job Log
+      {/* Upload knowledge textarea */}
+      {showUpload && (
+        <GlassPanel className="p-3" glow>
+          <div className="mb-2 text-[12px] uppercase tracking-[0.15em] text-zinc-700">
+            Upload Knowledge to DOOF
           </div>
-          <div className="max-h-[140px] space-y-1 overflow-y-auto font-mono text-[12px] text-zinc-600">
-            {(jobs.length === 0 && <div>No training jobs yet.</div>) ||
-              jobs.map((j) => (
-                <div key={j.id} className="truncate">
-                  <span className={j.status === "done" ? "text-emerald-500/70" : "text-violet-400/70"}>
-                    [{j.status}]
-                  </span>{" "}
-                  {j.created_at} · worker {j.worker ?? "—"}
-                </div>
-              ))}
+          <textarea
+            value={uploadText}
+            onChange={(e) => setUploadText(e.target.value)}
+            rows={4}
+            placeholder="Enter knowledge to teach DOOF (permanent)…"
+            className="w-full resize-none rounded-xl border border-white/[0.05] bg-black/40 p-2 text-[10px] text-zinc-300 outline-none placeholder:text-zinc-800 focus:border-violet-500/20"
+          />
+          <div className="mt-2 flex justify-end gap-2">
+            <GlassButton size="sm" variant="ghost" onClick={() => { setShowUpload(false); setUploadText(""); }}>
+              Cancel
+            </GlassButton>
+            <GlassButton
+              size="sm"
+              onClick={() => {
+                if (!uploadText.trim()) return;
+                void api("/api/knowledge", {
+                  method: "POST",
+                  body: JSON.stringify({ text: uploadText.trim(), source: "upload" }),
+                }).then(() => { setShowUpload(false); setUploadText(""); void refresh(); }).catch(() => {});
+              }}
+            >
+              Save
+            </GlassButton>
           </div>
         </GlassPanel>
       )}
+
+      {/* Job history — collapsed by default so the UI stays clean */}
+      {(() => {
+        const finished = jobs.filter(
+          (j) => j.status === "done" || j.status === "completed" || j.status === "failed" || j.status === "error",
+        );
+        const active = jobs.filter((j) => !finished.includes(j));
+        const visibleJobs = showFinishedJobs ? jobs : active;
+        return (
+          <GlassPanel className="mb-3 p-3">
+            <div className="mb-1.5 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => setShowJobHistory(!showJobHistory)}
+                className="flex items-center gap-2 text-[12px] uppercase tracking-[0.15em] text-zinc-700 transition hover:text-zinc-500"
+              >
+                <span className="text-[10px]">{showJobHistory ? "▾" : "▸"}</span>
+                Training Jobs
+                {(active.length > 0 || !showFinishedJobs) && (
+                  <span className="rounded-full border border-violet-400/20 bg-violet-500/[0.08] px-1.5 py-px text-[9px] normal-case text-violet-300">
+                    {showFinishedJobs ? jobs.length : `${active.length} active · ${finished.length} finished`}
+                  </span>
+                )}
+              </button>
+              <div className="flex items-center gap-2">
+                {showJobHistory && jobs.length > 0 && (
+                  <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-zinc-600">
+                    <input
+                      type="checkbox"
+                      checked={showFinishedJobs}
+                      onChange={(e) => setShowFinishedJobs(e.target.checked)}
+                      className="h-3 w-3 accent-violet-500"
+                    />
+                    Show finished
+                  </label>
+                )}
+                {showJobHistory && (
+                  <GlassButton size="sm" variant="ghost" onClick={() => void loadJobs()}>
+                    ↻
+                  </GlassButton>
+                )}
+              </div>
+            </div>
+            {showJobHistory && (
+              <>
+                {jobs.length === 0 ? (
+                  <div className="py-6 text-center text-[10px] text-zinc-800">No training jobs yet.</div>
+                ) : visibleJobs.length === 0 ? (
+                  <div className="py-6 text-center text-[10px] text-zinc-800">
+                    No active jobs. Enable “Show finished” to see completed runs.
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {visibleJobs.map((j) => (
+                <div
+                  key={j.id}
+                  className="flex items-center justify-between rounded-lg border border-white/[0.04] bg-black/30 px-2.5 py-1.5"
+                >
+                  <div className="flex min-w-0 flex-1 items-center gap-2 text-[12px]">
+                    <StatusBadge tone={jobStatusTone(j.status)}>
+                      {jobStatusLabel(j.status)}
+                    </StatusBadge>
+                    <span className="text-zinc-400 truncate">{j.type}</span>
+                    <span className="text-zinc-600 font-mono text-[11px]">{j.id.slice(0, 8)}…</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-[11px] text-zinc-600 shrink-0">
+                    {j.worker && <span>{j.worker}</span>}
+                    <span>{j.created_at}</span>
+                    {j.finished_at && <span>→ {j.finished_at}</span>}
+                    {j.error && (
+                      <span className="max-w-[180px] truncate text-rose-400/70" title={j.error}>
+                        {j.error}
+                      </span>
+                    )}
+                    {j.step != null && <span>Step {j.step}</span>}
+                    {j.epoch != null && <span>Ep {j.epoch}</span>}
+                    {j.loss != null && <span className="text-violet-300">L {Number(j.loss).toFixed(3)}</span>}
+                    {(j.status === "failed" || j.status === "error") && (
+                      <GlassButton size="sm" variant="ghost" onClick={() => void retryJob(j.id)}>
+                        Retry
+                      </GlassButton>
+                    )}
+                  </div>
+                </div>
+              ))}
+          </div>
+                )}
+              </>
+            )}
+          </GlassPanel>
+        );
+      })()}
 
       {/* Loss curve */}
       <GlassPanel className="p-3.5">
@@ -1497,6 +1993,9 @@ function TrainingTab({ online }: { online: boolean }) {
           </svg>
         )}
       </GlassPanel>
+
+      {/* Training complete easter egg */}
+      <TrainingCompleteEgg show={showTrainingEgg} />
     </div>
   );
 }
@@ -1505,28 +2004,81 @@ function TrainingTab({ online }: { online: boolean }) {
    NETWORK TAB
    ========================================================= */
 
-function LegacyNetworkTab({ online }: { online: boolean }) {
-  const [nodes, setNodes] = useState<NodeItem[]>([]);
-  const [totalVram, setTotalVram] = useState(0);
+type BrainNetworkState = {
+  nodes_online: number;
+  total_vram_gb: number;
+  connected_users: number;
+  training_active: boolean;
+  workers_online: number;
+  tailscale?: {
+    enabled: boolean;
+    hostname?: string;
+    ip?: string;
+    connected?: boolean;
+  };
+  compute_pool?: {
+    accepting_jobs: boolean;
+    allow_train: boolean;
+    allow_inference: boolean;
+  };
+  nodes?: NodeItem[];
+};
 
-  const [trainingActive, setTrainingActive] = useState(false);
+function LegacyNetworkTab({ online }: { online: boolean }) {
+  const [net, setNet] = useState<BrainNetworkState>({
+    nodes_online: 0,
+    total_vram_gb: 0,
+    connected_users: 0,
+    training_active: false,
+    workers_online: 0,
+    nodes: [],
+  });
+  const [poolSettings, setPoolSettings] = useState({
+    accepting_jobs: true,
+    allow_train: true,
+    allow_inference: true,
+  });
+  const [poolSaved, setPoolSaved] = useState(false);
+  const [resourcePreset, setResourcePreset] = useState<ResourcePreset>("balanced");
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
     if (!online) return;
     setLoading(true);
     try {
-      const data = await apiCached<{
-        nodes: NodeItem[];
-        nodes_online: number;
-        connected_users: number;
-        total_vram_gb: number;
-        training_active: boolean;
-        workers_online: number;
-      }>("/api/network", 4000);
-      setNodes(data.nodes ?? []);
-      setTotalVram(data.total_vram_gb ?? 0);
-      setTrainingActive(data.training_active ?? false);
+      const [networkData, brainData] = await Promise.allSettled([
+        apiCached<{
+          nodes: NodeItem[];
+          nodes_online: number;
+          connected_users: number;
+          total_vram_gb: number;
+          training_active: boolean;
+          workers_online: number;
+        }>("/api/network", 4000),
+        apiCached<BrainNetworkState>("/api/brain_network", 4000),
+      ]);
+
+      const nd = networkData.status === "fulfilled" ? networkData.value : null;
+      const bd = brainData.status === "fulfilled" ? brainData.value : null;
+
+      setNet({
+        nodes: nd?.nodes ?? bd?.nodes ?? [],
+        nodes_online: nd?.nodes_online ?? bd?.nodes_online ?? 0,
+        total_vram_gb: nd?.total_vram_gb ?? bd?.total_vram_gb ?? 0,
+        connected_users: nd?.connected_users ?? bd?.connected_users ?? 0,
+        training_active: nd?.training_active ?? bd?.training_active ?? false,
+        workers_online: nd?.workers_online ?? bd?.workers_online ?? 0,
+        tailscale: bd?.tailscale,
+        compute_pool: bd?.compute_pool,
+      });
+
+      if (bd?.compute_pool) {
+        setPoolSettings({
+          accepting_jobs: bd.compute_pool.accepting_jobs ?? true,
+          allow_train: bd.compute_pool.allow_train ?? true,
+          allow_inference: bd.compute_pool.allow_inference ?? true,
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -1540,9 +2092,20 @@ function LegacyNetworkTab({ online }: { online: boolean }) {
     return () => clearInterval(t);
   }, [online, load]);
 
-  const uniqueNodes = Array.from(new Map(nodes.map((n) => [n.id || n.name, n])).values());
+  const uniqueNodes = Array.from(new Map((net.nodes ?? []).map((n) => [n.id || n.name, n])).values());
   const onlineNodes = uniqueNodes.filter((n) => n.status === "online");
-  const connectedUsers = Math.max(1, onlineNodes.filter((n) => !n.is_local).length + (onlineNodes.some((n) => n.is_local) ? 1 : 0));
+
+  const savePoolSettings = async () => {
+    try {
+      await api("/api/brain_network/pool", {
+        method: "POST",
+        body: JSON.stringify(poolSettings),
+      });
+      setPoolSaved(true);
+      setTimeout(() => setPoolSaved(false), 2000);
+      void load();
+    } catch { /* ignore */ }
+  };
 
   return (
     <div className="flex-1 overflow-y-auto p-4">
@@ -1552,7 +2115,7 @@ function LegacyNetworkTab({ online }: { online: boolean }) {
           WHO'S HELPING DOOF THINK
         </div>
         <div className="mt-1 text-[18px] font-semibold text-zinc-100">
-          NETWORK
+          BRAIN NETWORK
         </div>
         <div className="mt-1 text-[12px] leading-relaxed text-zinc-500">
           {onlineNodes.length > 0
@@ -1563,21 +2126,26 @@ function LegacyNetworkTab({ online }: { online: boolean }) {
       </div>
 
       {/* Summary */}
-      <div className="mb-3 grid grid-cols-3 gap-1.5">
+      <div className="mb-3 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
         <MetricCard
           label="Nodes Online"
-          value={onlineNodes.length}
+          value={net.nodes_online}
           sub={`of ${uniqueNodes.length} registered`}
           accent
         />
         <MetricCard
           label="Connected Users"
-          value={connectedUsers}
+          value={net.connected_users}
           sub="Trusted collaborators"
         />
         <MetricCard
           label="Total VRAM"
-          value={`${totalVram.toFixed(1)} GB`}
+          value={`${net.total_vram_gb.toFixed(1)} GB`}
+        />
+        <MetricCard
+          label="Workers"
+          value={net.workers_online}
+          sub="Active compute"
         />
       </div>
 
@@ -1588,21 +2156,104 @@ function LegacyNetworkTab({ online }: { online: boolean }) {
         />
         <MetricCard
           label="Training"
-          value={trainingActive ? "Active" : "Idle"}
+          value={net.training_active ? "Active" : "Idle"}
           sub={
-            trainingActive
-              ? nodes.find((n) => n.training_active)?.name ?? ""
+            net.training_active
+              ? uniqueNodes.find((n) => n.training_active)?.name ?? ""
               : undefined
           }
         />
       </div>
+
+      {/* Tailscale status */}
+      {net.tailscale && (
+        <GlassPanel className="mb-3 p-3">
+          <div className="mb-1.5 text-[12px] uppercase tracking-[0.12em] text-zinc-700">
+            Tailscale
+          </div>
+          <div className="flex items-center gap-3 text-[12px]">
+            <StatusBadge tone={net.tailscale.enabled && net.tailscale.connected ? "online" : net.tailscale.enabled ? "warning" : "neutral"}>
+              <StatusDot on={Boolean(net.tailscale.enabled && net.tailscale.connected)} />
+              {net.tailscale.enabled ? (net.tailscale.connected ? "Connected" : "Enabled") : "Not configured"}
+            </StatusBadge>
+            {net.tailscale.hostname && <span className="text-zinc-400">{net.tailscale.hostname}</span>}
+            {net.tailscale.ip && <span className="font-mono text-[11px] text-zinc-600">{net.tailscale.ip}</span>}
+          </div>
+        </GlassPanel>
+      )}
+
+      {/* Compute pool settings */}
+      <GlassPanel className="mb-3 p-3">
+        <div className="mb-1.5 text-[12px] uppercase tracking-[0.12em] text-zinc-700">
+          Compute Pool Settings
+        </div>
+        <div className="space-y-2">
+          {([
+            ["accepting_jobs", "Accept Training Jobs", "Allow this node to accept work from the training queue"],
+            ["allow_train", "Allow Training", "Enable training capability on this compute pool"],
+            ["allow_inference", "Allow Inference", "Enable inference capability on this compute pool"],
+          ] as const).map(([key, label, desc]) => (
+            <div key={key} className="flex items-center justify-between rounded-lg border border-white/[0.04] bg-black/30 px-2.5 py-2">
+              <div>
+                <div className="text-[12px] text-zinc-300">{label}</div>
+                <div className="text-[11px] text-zinc-600">{desc}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPoolSettings((s) => ({ ...s, [key]: !s[key] }))}
+                className={[
+                  "relative h-5 w-9 shrink-0 rounded-full border transition-all duration-200",
+                  poolSettings[key]
+                    ? "border-violet-400/30 bg-violet-600/80"
+                    : "border-white/[0.08] bg-white/[0.03]",
+                ].join(" ")}
+              >
+                <span
+                  className={[
+                    "absolute top-0.5 h-3.5 w-3.5 rounded-full transition-all duration-200",
+                    poolSettings[key]
+                      ? "left-[18px] bg-white shadow-[0_0_6px_rgba(139,92,246,0.4)]"
+                      : "left-0.5 bg-zinc-500",
+                  ].join(" ")}
+                />
+              </button>
+            </div>
+          ))}
+          <div className="flex items-center justify-between pt-1">
+            <div className="text-[11px] text-zinc-600">
+              Resource preset
+            </div>
+            <div className="flex gap-1">
+              {(Object.keys(RESOURCE_PRESETS) as ResourcePreset[]).map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  title={RESOURCE_PRESETS[key].desc}
+                  onClick={() => setResourcePreset(key)}
+                  className={[
+                    "rounded-md px-2 py-1 text-[10px] transition-all duration-200",
+                    resourcePreset === key
+                      ? "bg-violet-600/30 text-violet-200 border border-violet-400/30"
+                      : "bg-white/[0.03] text-zinc-500 border border-white/[0.05] hover:bg-white/[0.06]",
+                  ].join(" ")}
+                >
+                  {RESOURCE_PRESETS[key].label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <GlassButton size="sm" onClick={() => void savePoolSettings()}>
+            {poolSaved ? "✓ Saved" : "Save Settings"}
+          </GlassButton>
+        </div>
+      </GlassPanel>
 
       {/* Node cards */}
       <div className="mb-2 text-[11px] uppercase tracking-[0.15em] text-zinc-500">
         Connected Nodes
       </div>
       <div className="space-y-1.5">
-        {loading && nodes.length === 0 && (
+        {loading && uniqueNodes.length === 0 && (
           <div className="py-12 text-center text-[10px] text-zinc-800">Loading…</div>
         )}
         {uniqueNodes.map((node) => (
@@ -1655,8 +2306,8 @@ function LegacyNetworkTab({ online }: { online: boolean }) {
         {uniqueNodes.length === 1 && (
           <div className="mt-3 rounded-xl border border-dashed border-white/[0.06] px-4 py-3 text-[12px] leading-relaxed text-zinc-500">
             You are the only live node on this brain. Friends appear here when they
-            join the same API host (Login → Join existing brain) or share the same
-            Supabase project. A standalone EXE zip is its own network.
+            join the same DOOF server (Login → Join existing brain) or share the same
+            Cloud Sync project. A standalone EXE zip is its own network.
           </div>
         )}
       </div>
@@ -1678,7 +2329,24 @@ function LegacyNetworkTab({ online }: { online: boolean }) {
 
 function ModelsTab({ online }: { online: boolean }) {
   const [ckpts, setCkpts] = useState<CheckpointItem[]>([]);
-  const [modelInfo, setModelInfo] = useState<Data>({});
+  const [modelInfo, setModelInfo] = useState<Record<string, unknown>>({});
+  const [syncInfo, setSyncInfo] = useState<{ active_model?: Record<string, unknown>; compatible?: boolean; compatibility_reason?: string; cached?: { name: string; size: number }[] } | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
+  // Narrowed accessors for modelInfo
+  const mi = modelInfo as {
+    loaded?: boolean;
+    parameters_m?: number;
+    device?: string;
+    d_model?: number;
+    status?: string;
+    checkpoint_name?: string;
+    vocab_size?: number;
+    step?: number;
+    loss?: number;
+    n_layers?: number;
+    checkpoint_size_mb?: number;
+  };
 
   const load = useCallback(async () => {
     if (!online) return;
@@ -1688,21 +2356,57 @@ function ModelsTab({ online }: { online: boolean }) {
     ]);
     setCkpts(vers.checkpoints ?? []);
     setModelInfo(info);
+    try {
+      const sync = await apiCached<{ active_model?: Record<string, unknown>; compatible?: boolean; compatibility_reason?: string; cached?: { name: string; size: number }[] }>("/api/models/sync/check", 30000);
+      setSyncInfo(sync);
+    } catch { /* ignore */ }
   }, [online]);
 
   useEffect(() => { void load(); }, [load]);
 
+  const [promoteBusy, setPromoteBusy] = useState<string | null>(null);
+  const toast = useToast();
+
   const loadCkpt = async (path: string) => {
-    await api("/api/model/load", { method: "POST", body: JSON.stringify({ path }) });
+    try {
+      await api("/api/model/load", { method: "POST", body: JSON.stringify({ path }) });
+      toast("success", "Checkpoint loaded.");
+    } catch {
+      toast("error", "Could not load checkpoint.");
+    }
     void load();
   };
 
   const promote = async (name: string, label: string) => {
-    await api("/api/models/promote", {
-      method: "POST",
-      body: JSON.stringify({ checkpoint_name: name, label }),
-    });
-    void load();
+    setPromoteBusy(name);
+    try {
+      await api("/api/models/promote", {
+        method: "POST",
+        body: JSON.stringify({ checkpoint_name: name, label }),
+      });
+      toast("success", `Promoted "${label}" to production. DOOF will use it next restart.`);
+    } catch {
+      toast("error", "Promotion failed. Check the server logs.");
+    } finally {
+      setPromoteBusy(null);
+    }
+    // Bypass cached versions so the new production status shows immediately.
+    cacheInvalidate("/api/models/versions");
+    await load();
+  };
+
+  const rollback = async () => {
+    setPromoteBusy("rollback");
+    try {
+      await api("/api/models/rollback", { method: "POST", body: JSON.stringify({}) });
+      toast("success", "Rolled back to the previous approved version.");
+    } catch {
+      toast("error", "Rollback failed. No earlier approved version is installed.");
+    } finally {
+      setPromoteBusy(null);
+    }
+    cacheInvalidate("/api/models/versions");
+    await load();
   };
 
   const production = ckpts.find((c) => c.status === "production");
@@ -1722,24 +2426,91 @@ function ModelsTab({ online }: { online: boolean }) {
         </div>
       </div>
 
+      {/* Model sync info */}
+      {syncInfo && (
+        <GlassPanel className="mb-3 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-[12px] uppercase tracking-[0.15em] text-zinc-700">
+              Model Registry
+            </div>
+            <GlassButton
+              size="sm"
+              variant="ghost"
+              onClick={async () => {
+                setSyncing(true);
+                try {
+                  await api("/api/models/sync/ensure", { method: "POST", body: JSON.stringify({ model_id: "doof-base" }) });
+                  void load();
+                } finally {
+                  setSyncing(false);
+                }
+              }}
+              disabled={syncing}
+            >
+              {syncing ? "Syncing…" : "Check for Updates"}
+            </GlassButton>
+          </div>
+          <div className="grid grid-cols-3 gap-1.5">
+            <MetricCard
+              label="Registry"
+              value={syncInfo.active_model ? String(syncInfo.active_model.version ?? "—") : "—"}
+            />
+            <MetricCard
+              label="Compatibility"
+              value={syncInfo.compatible ? "OK" : "Incompatible"}
+              accent={syncInfo.compatible}
+            />
+            <MetricCard
+              label="Cached Models"
+              value={syncInfo.cached?.length ?? 0}
+            />
+          </div>
+          {syncInfo.compatibility_reason && syncInfo.compatibility_reason !== "Compatible" && (
+            <div className="mt-1.5 text-[11px] text-amber-400/70">{syncInfo.compatibility_reason}</div>
+          )}
+        </GlassPanel>
+      )}
+
       {/* Current model stats */}
       <div className="mb-3 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
         <MetricCard
           label="Parameters"
           value={
-            modelInfo.parameters_m != null
-              ? `${String(modelInfo.parameters_m)}M`
+            mi.parameters_m != null
+              ? `${mi.parameters_m}M`
               : "—"
           }
           accent
         />
-        <MetricCard label="Device" value={String(modelInfo.device ?? "—")} />
-        <MetricCard label="d_model" value={String(modelInfo.d_model ?? "—")} />
+        <MetricCard
+          label="Device"
+          value={mi.device ?? (mi.loaded ? "cpu" : "—")}
+        />
+        <MetricCard label="d_model" value={mi.d_model != null ? String(mi.d_model) : "—"} />
         <MetricCard
           label="Status"
-          value={modelInfo.loaded ? "Loaded" : "No model"}
+          value={
+            mi.loaded
+              ? "Loaded"
+              : mi.status === "checkpoint found, not loaded"
+                ? "Ready"
+                : mi.status === "no checkpoint"
+                  ? "No checkpoint"
+                  : "Loading..."
+          }
         />
       </div>
+      {/* Extra model details when checkpoint found but not loaded */}
+      {!mi.loaded && mi.checkpoint_name && (
+        <div className="mb-3 flex flex-wrap gap-3 text-[11px] text-zinc-600">
+          <span>Checkpoint: {mi.checkpoint_name}</span>
+          {mi.vocab_size != null && <span>Vocab: {mi.vocab_size}</span>}
+          {mi.step != null && <span>Step: {mi.step}</span>}
+          {mi.loss != null && <span>Loss: {mi.loss.toFixed(4)}</span>}
+          {mi.n_layers != null && <span>Layers: {mi.n_layers}</span>}
+          {mi.checkpoint_size_mb != null && <span>Size: {mi.checkpoint_size_mb}MB</span>}
+        </div>
+      )}
 
       {/* Production brain */}
       {production && (
@@ -1761,13 +2532,23 @@ function ModelsTab({ online }: { online: boolean }) {
                 {production.step != null && ` · Step ${production.step}`}
               </div>
             </div>
-            <GlassButton
-              size="sm"
-              variant="ghost"
-              onClick={() => void loadCkpt(production.path)}
-            >
-              Reload
-            </GlassButton>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <GlassButton
+                size="sm"
+                variant="ghost"
+                disabled={promoteBusy === "rollback"}
+                onClick={() => void rollback()}
+              >
+                {promoteBusy === "rollback" ? "Rolling back…" : "Roll back"}
+              </GlassButton>
+              <GlassButton
+                size="sm"
+                variant="ghost"
+                onClick={() => void loadCkpt(production.path)}
+              >
+                Reload
+              </GlassButton>
+            </div>
           </GlassPanel>
         </div>
       )}
@@ -1815,11 +2596,12 @@ function ModelsTab({ online }: { online: boolean }) {
                 <GlassButton
                   size="sm"
                   variant="success"
+                  disabled={promoteBusy === ck.name}
                   onClick={() =>
                     void promote(ck.name, ck.version_label ?? ck.name)
                   }
                 >
-                  Promote
+                  {promoteBusy === ck.name ? "Promoting…" : "Promote"}
                 </GlassButton>
               )}
             </div>
@@ -1833,6 +2615,26 @@ function ModelsTab({ online }: { online: boolean }) {
 /* =========================================================
    SETTINGS TAB
    ========================================================= */
+
+function CloudAdvanced() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-1.5">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="text-[11px] text-zinc-700 transition hover:text-zinc-500"
+      >
+        {open ? "▾ Hide Advanced" : "▸ Advanced"}
+      </button>
+      {open && (
+        <div className="mt-1.5 rounded-lg border border-white/[0.04] bg-white/[0.01] p-2.5 text-[11px] leading-relaxed text-zinc-700">
+          Set Cloud Sync environment variables to enable cloud sync. Local mode still works.
+        </div>
+      )}
+    </div>
+  );
+}
 
 function SettingsTab({
   online,
@@ -1870,6 +2672,12 @@ function SettingsTab({
     ["top_k", 1, 100, 1],
   ];
 
+  const SLIDER_META: Record<string, { label: string; desc: string }> = {
+    temperature: { label: "Temperature", desc: "Controls how predictable or creative DOOF's responses are." },
+    max_new_tokens: { label: "Max Tokens", desc: "Controls how long DOOF's responses can be." },
+    top_k: { label: "Top-k", desc: "Controls diversity of generated text." },
+  };
+
   return (
     <div className="flex-1 overflow-y-auto p-4">
       <div className="mx-auto max-w-lg space-y-5">
@@ -1879,12 +2687,29 @@ function SettingsTab({
             Inference
           </div>
           <GlassPanel className="space-y-4 p-3.5">
+            {/* Inference Device */}
+            <div>
+              <div className="mb-1.5 flex justify-between text-[12px]">
+                <span className="text-zinc-500">Inference Device</span>
+                <span className="tabular-nums text-zinc-400">{hw?.device?.toUpperCase() ?? "—"}</span>
+              </div>
+              <div className="text-[11px] text-zinc-700">Choose where DOOF runs its neural model.</div>
+            </div>
+            {/* Model */}
+            <div>
+              <div className="mb-1.5 flex justify-between text-[12px]">
+                <span className="text-zinc-500">Model</span>
+                <span className="tabular-nums text-zinc-400">—</span>
+              </div>
+              <div className="text-[11px] text-zinc-700">Choose the installed DOOF brain version.</div>
+            </div>
             {SLIDERS.map(([key, min, max, step]) => (
               <label key={key} className="block">
-                <div className="mb-1.5 flex justify-between text-[12px]">
-                  <span className="text-zinc-600">{key.replace(/_/g, " ")}</span>
+                <div className="mb-0.5 flex justify-between text-[12px]">
+                  <span className="text-zinc-500">{SLIDER_META[key].label}</span>
                   <span className="tabular-nums text-zinc-400">{sett[key]}</span>
                 </div>
+                <div className="mb-1.5 text-[11px] text-zinc-700">{SLIDER_META[key].desc}</div>
                 <input
                   type="range"
                   min={min}
@@ -1933,10 +2758,10 @@ function SettingsTab({
           </section>
         )}
 
-        {/* Cloud */}
+        {/* Cloud Sync */}
         <section>
           <div className="mb-2 text-[12px] uppercase tracking-[0.16em] text-zinc-700">
-            Cloud / Supabase
+            Cloud Sync
           </div>
           <GlassPanel className="flex items-center gap-2 p-3">
             <StatusDot on={Boolean(cloud.connected)} />
@@ -1944,9 +2769,10 @@ function SettingsTab({
               {String(cloud.message ?? cloud.status ?? "Local mode · offline only")}
             </span>
           </GlassPanel>
-          <div className="mt-1.5 text-[12px] text-zinc-800">
-            Set SUPABASE_URL and SUPABASE_ANON_KEY to enable cloud sync. Local mode still works.
+          <div className="mt-1.5 text-[12px] text-zinc-600">
+            Configure Cloud Sync to share your Brain across devices.
           </div>
+          <CloudAdvanced />
         </section>
 
         {/* Ambient */}
@@ -1976,15 +2802,15 @@ function SettingsTab({
         <section>
           <div className="mb-2 text-[12px] uppercase tracking-[0.16em] text-zinc-700">About</div>
           <GlassPanel className="p-3.5 text-[12px] leading-relaxed text-zinc-700">
-            DOOF v0.2 Alpha · decoder-only Transformer · local-first private AI OS
+            DOOF v3.0 &middot; decoder-only Transformer &middot; local-first private AI OS
             <br />
             Fueled by Big Ol&apos; Rusty Tuna Cans, Shawarmas and Red Bull.
             <br />
             Intelligence: memory, RAG, quality scoring, dataset builder, evaluation
             <br />
-            Compute: job-level pool · one job, one node · never silent remote use
+            Compute: job-level pool &middot; one job, one node &middot; never silent remote use
             <br />
-            Fueled by shawarmas, Lebanon, and the occasional rusty tuna can.
+            <span className="text-zinc-600">{sidebarFooter(true)}</span>
           </GlassPanel>
         </section>
       </div>
@@ -2131,7 +2957,600 @@ function LegacyHardwareTab({ hw, online }: { hw: HardwareInfo | null; online: bo
   );
 }
 
+/* =========================================================
+   FEEDBACK TAB — Review and approve/correct DOOF responses
+   ========================================================= */
+
+function FeedbackTab({ online }: { online: boolean }) {
+  const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [filter, setFilter] = useState<"all" | "good" | "bad" | "pending">("all");
+
+  const load = useCallback(async () => {
+    if (!online) return;
+    setLoading(true);
+    try {
+      const data = await apiCached<{ items: any[]; total: number; approved: number; training_ready: number }>("/api/feedback", 5000);
+      setItems(data.items ?? []);
+    } finally {
+      setLoading(false);
+    }
+  }, [online]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const filtered = useMemo(() => {
+    if (filter === "all") return items;
+    if (filter === "pending") return items.filter((f) => !f.approved);
+    return items.filter((f) => f.rating === filter);
+  }, [items, filter]);
+
+  const approveItem = async (id: string) => {
+    await api(`/api/feedback/${id}/approve`, { method: "POST" });
+    cacheInvalidate("/api/feedback");
+    void load();
+  };
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
+      <div>
+        <div className="text-[12px] uppercase tracking-[0.18em] text-zinc-500">
+          REVIEW WHAT DOOF LEARNED
+        </div>
+        <div className="mt-1 text-[13px] font-semibold text-zinc-100">FEEDBACK</div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-1.5">
+        <MetricCard label="Total" value={items.length} />
+        <MetricCard label="Approved" value={items.filter((f) => f.approved).length} accent />
+        <MetricCard label="Training Ready" value={items.filter((f) => f.training_ready).length} />
+      </div>
+
+      <div className="flex items-center gap-2">
+        {(["all", "good", "bad", "pending"] as const).map((f) => (
+          <GlassButton
+            key={f}
+            variant={filter === f ? "primary" : "ghost"}
+            size="sm"
+            onClick={() => setFilter(f)}
+          >
+            {f.charAt(0).toUpperCase() + f.slice(1)}
+          </GlassButton>
+        ))}
+        <div className="flex-1" />
+        <GlassButton variant="ghost" onClick={() => void load()}>↻</GlassButton>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {loading && items.length === 0 && (
+          <div className="py-12 text-center text-[10px] text-zinc-800">Loading…</div>
+        )}
+        {!loading && filtered.length === 0 && (
+          <div className="py-12 text-center text-[10px] text-zinc-800">No feedback yet.</div>
+        )}
+        <div className="space-y-1.5">
+          {filtered.map((fb) => (
+            <div
+              key={fb.id}
+              className="rounded-xl border border-white/[0.04] bg-white/[0.01] px-3 py-2.5 transition-all hover:border-white/[0.07]"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[11px] font-medium text-zinc-400">Q: {fb.prompt}</div>
+                  <div className="mt-1 text-[10px] leading-snug text-zinc-300">
+                    {fb.correction ? (
+                      <>
+                        <span className="text-zinc-500 line-through">{fb.response}</span>
+                        <span className="ml-2 text-emerald-400/70">→ {fb.correction}</span>
+                      </>
+                    ) : (
+                      fb.response
+                    )}
+                  </div>
+                  <div className="mt-1 flex items-center gap-2 text-[12px] text-zinc-700">
+                    <StatusBadge tone={fb.rating === "good" ? "online" : "danger"}>
+                      {fb.rating}
+                    </StatusBadge>
+                    <span>·</span>
+                    <span>Quality: {fb.quality?.toFixed(2) ?? "—"}</span>
+                    <span>·</span>
+                    <span>{fb.created_at?.slice(0, 10) ?? ""}</span>
+                  </div>
+                </div>
+                <div className="shrink-0">
+                  {!fb.approved ? (
+                    <GlassButton size="sm" variant="success" onClick={() => void approveItem(fb.id)}>
+                      Approve
+                    </GlassButton>
+                  ) : (
+                    <StatusBadge tone="online">Approved</StatusBadge>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   TEACH & DATASET TAB — the human data contribution surface.
+   MEMORY = info DOOF can retrieve.  TRAINING = human-approved
+   examples that change the model's weights.
+   ========================================================= */
+
+type DatasetExample = {
+  id: string;
+  prompt: string;
+  response: string;
+  rating?: string;
+  correction?: string;
+  quality?: number | null;
+  approved?: boolean;
+  training_ready?: boolean;
+  approved_at?: string | null;
+  approved_by?: string;
+  created_by?: string;
+  created_at?: string;
+  source?: string; // manual | feedback | memory | imported | ai
+  authored?: string; // human | ai | imported | memory
+  memory_ids?: string[];
+};
+
+const EXAMPLES_KEY = "/api/approved_examples";
+
+function normalizeForDup(prompt: string, response: string): string {
+  const tag = (s: string) => (s || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return `${tag(prompt)}|${tag(response)}`;
+}
+
+function TeachTab({ online }: { online: boolean }) {
+  const toast = useToast();
+  // ---- contribution composer ----
+  const [mode, setMode] = useState<"memory" | "approve">("memory");
+  const [fact, setFact] = useState("");
+  const [exPrompt, setExPrompt] = useState("");
+  const [exResponse, setExResponse] = useState("");
+  const [aiAssist, setAiAssist] = useState(false);
+  const [busy, setBusy] = useState<null | "memory" | "dataset" | "ai">(null);
+  const [fileName, setFileName] = useState<string | null>(null);
+
+  // ---- dataset library ----
+  const [examples, setExamples] = useState<DatasetExample[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [filter, setFilter] = useState<"all" | "pending" | "in_training">("all");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editPrompt, setEditPrompt] = useState("");
+  const [editResponse, setEditResponse] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!online) return;
+    setLoading(true);
+    try {
+      const data = await api<{ examples?: DatasetExample[] }>(
+        `${EXAMPLES_KEY}?approved=false`,
+        { method: "GET" },
+      );
+      setExamples(data.examples ?? []);
+    } finally {
+      setLoading(false);
+    }
+  }, [online]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const [stats, setStats] = useState({ total: 0, pending: 0, approved: 0, training_ready: 0 });
+  useEffect(() => {
+    setStats({
+      total: examples.length,
+      approved: examples.filter((e) => e.approved).length,
+      pending: examples.filter((e) => !e.approved).length,
+      training_ready: examples.filter((e) => e.training_ready).length,
+    });
+  }, [examples]);
+
+  const dupKeys = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const e of examples) {
+      const k = normalizeForDup(e.prompt, e.response);
+      counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+    return counts;
+  }, [examples]);
+
+  const filtered = useMemo(() => {
+    if (filter === "pending") return examples.filter((e) => !e.approved);
+    if (filter === "in_training") return examples.filter((e) => e.approved && e.training_ready);
+    return examples;
+  }, [examples, filter]);
+
+  const importFile = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result ?? "");
+      setFact((cur) => (cur ? cur + "\n" : "") + text);
+      setFileName(file.name);
+      toast("success", `Loaded "${file.name}"`);
+    };
+    reader.onerror = () => toast("error", `Could not read "${file.name}"`);
+    reader.readAsText(file);
+  };
+
+  const saveMemory = async () => {
+    const lines = (fact || "").split(/\n+/).map((l) => l.replace(/\s+/g, " ").trim()).filter((l) => l.length >= 4);
+    if (!lines.length) { toast("info", "Nothing to save yet."); return; }
+    setBusy("memory");
+    let saved = 0;
+    for (const line of lines.slice(0, 100)) {
+      try {
+        await api(`/api/memory`, {
+          method: "POST",
+          body: JSON.stringify({ content: line, importance: "medium", category: "taught", tags: ["taught"] }),
+        });
+        saved++;
+      } catch { /* partial save is fine */ }
+    }
+    cacheInvalidate("/api/memory");
+    if (saved) toast("success", `${saved} memory saved — DOOF can retrieve it now.`);
+    else toast("error", "Could not save. Is the server running?");
+    setBusy(null);
+    if (saved) { setFact(""); setFileName(null); }
+  };
+
+  // Human-approved training example — this is the ONLY path into training.
+  const saveApprove = async () => {
+    const prompt = exPrompt.trim();
+    const response = exResponse.trim();
+    if (!prompt || !response) { toast("info", "Write both a prompt and DOOF's response."); return; }
+    setBusy("dataset");
+    try {
+      await api(EXAMPLES_KEY, {
+        method: "POST",
+        body: JSON.stringify({
+          prompt,
+          response,
+          rating: "good",
+          source: aiAssist ? "ai" : "manual",
+          authored: aiAssist ? "ai" : "human",
+          approved: true,
+          training_ready: true,
+        }),
+      });
+      cacheInvalidate(EXAMPLES_KEY);
+      toast("success", "Example approved for training — DOOF will learn it on the next run.");
+      setExPrompt(""); setExResponse(""); setAiAssist(false);
+      void load();
+    } catch (e) {
+      toast("error", `Could not save example: ${e instanceof Error ? e.message : "server error"}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // AI assistance is OPTIONAL + clearly labeled. It drafts a suggested response
+  // only — it never enters training on its own; a human must approve + save it.
+  const suggestAi = async () => {
+    const prompt = exPrompt.trim();
+    if (!prompt) { toast("info", "Write a prompt first, then ask DOOF to suggest a response."); return; }
+    setBusy("ai");
+    try {
+      const data = await api<{ text?: string }>("/api/generate", {
+        method: "POST",
+        body: JSON.stringify({ prompt, temperature: 0.7, max_new_tokens: 120, top_k: 40 }),
+      });
+      const t = (data.text || "").trim();
+      if (!t) throw new Error("empty");
+      setExResponse(t);
+      setAiAssist(true);
+      toast("info", "AI suggestion added — it is never auto-approved. Review and save to train on it.");
+    } catch {
+      toast("error", "AI is unavailable right now (offline or model not loaded). You can still write the example yourself.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggle = async (e: DatasetExample) => {
+    if (busyId) return;
+    setBusyId(e.id);
+    const nextApproved = !e.approved;
+    try {
+      await api(`${EXAMPLES_KEY}/${e.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          approved: nextApproved,
+          training_ready: nextApproved,
+          approved_by: "local",
+          approved_at: nextApproved ? new Date().toISOString() : null,
+        }),
+      });
+      cacheInvalidate(EXAMPLES_KEY);
+      toast("success", nextApproved ? "Approved for training." : "Moved back to pending (not trained).");
+      void load();
+    } catch (err) {
+      toast("error", `Could not update: ${err instanceof Error ? err.message : "server error"}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const saveEdit = async () => {
+    if (!editingId) return;
+    try {
+      await api(`${EXAMPLES_KEY}/${editingId}`, {
+        method: "PUT",
+        body: JSON.stringify({ prompt: editPrompt, response: editResponse }),
+      });
+      cacheInvalidate(EXAMPLES_KEY);
+      toast("success", "Example updated.");
+      setEditingId(null);
+      void load();
+    } catch (err) {
+      toast("error", `Could not edit: ${err instanceof Error ? err.message : "server error"}`);
+    }
+  };
+
+  const remove = async () => {
+    if (!confirmDeleteId) return;
+    try {
+      await api(`${EXAMPLES_KEY}/${confirmDeleteId}`, { method: "DELETE" });
+      cacheInvalidate(EXAMPLES_KEY);
+      toast("success", "Example deleted.");
+      setConfirmDeleteId(null);
+      void load();
+    } catch (err) {
+      toast("error", `Could not delete: ${err instanceof Error ? err.message : "server error"}`);
+    }
+  };
+
+  const sourceLabel = (e: DatasetExample): { label: string; cls: string } => {
+    const a = e.authored || e.source || "manual";
+    if (a === "ai") return { label: "AI-assisted", cls: "border-violet-400/20 bg-violet-500/[0.06] text-violet-300" };
+    if (a === "imported") return { label: "Imported", cls: "border-amber-400/20 bg-amber-500/[0.06] text-amber-300" };
+    return { label: "Human", cls: "border-emerald-400/20 bg-emerald-500/[0.06] text-emerald-300" };
+  };
+
+  const stateBanner = !online
+    ? <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-[12px] text-zinc-500">⚡ Offline</div>
+    : loading && examples.length === 0
+      ? <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-[12px] text-zinc-500">Loading…</div>
+      : examples.length === 0
+        ? <div className="rounded-xl border border-amber-400/15 bg-amber-400/[0.03] px-3 py-2 text-[12px] text-amber-200/70">No training examples yet. Add one below.</div>
+        : null;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
+      {/* Header */}
+      <div>
+        <div className="text-[12px] uppercase tracking-[0.18em] text-zinc-500">TEACH DOOF</div>
+        <div className="mt-1 text-[13px] font-semibold text-zinc-100">CONTRIBUTE WHAT DOOF KNOWS</div>
+        <p className="mt-1 max-w-2xl text-[12px] leading-relaxed text-zinc-500">
+          <span className="text-zinc-300">Memory</span> = information DOOF can retrieve during a chat.
+          <span className="text-zinc-300"> Training</span> = human-approved examples that permanently change how DOOF thinks.
+        </p>
+      </div>
+
+      {/* State banner */}
+      {stateBanner}
+
+      {/* Memory vs Training routing */}
+      <div className="grid grid-cols-2 gap-1.5">
+        <button
+          type="button"
+          onClick={() => setMode("memory")}
+          className={[
+            "rounded-xl border px-3 py-2.5 text-left transition-all",
+            mode === "memory" ? "border-violet-400/25 bg-violet-500/[0.06]" : "border-white/[0.05] bg-white/[0.01] hover:border-white/[0.09]",
+          ].join(" ")}
+        >
+          <div className="text-[12px] font-semibold text-zinc-200">📥 Teach a fact → Memory</div>
+          <div className="mt-0.5 text-[11px] text-zinc-600">DOOF can look it up right now. Doesn't change the model.</div>
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("approve")}
+          className={[
+            "rounded-xl border px-3 py-2.5 text-left transition-all",
+            mode === "approve" ? "border-emerald-400/25 bg-emerald-500/[0.06]" : "border-white/[0.05] bg-white/[0.01] hover:border-white/[0.09]",
+          ].join(" ")}
+        >
+          <div className="text-[12px] font-semibold text-zinc-200">🎓 Write an example → Training</div>
+          <div className="mt-0.5 text-[11px] text-zinc-600">A prompt + answer pair for the dataset. Requires your approval.</div>
+        </button>
+      </div>
+
+      {/* Composer */}
+      {mode === "memory" ? (
+        <GlassPanel className="p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-[12px] uppercase tracking-[0.15em] text-zinc-700">Paste or import text → Memory</div>
+            <label className="cursor-pointer rounded-lg border border-white/[0.07] bg-white/[0.02] px-2 py-1 text-[11px] text-zinc-400 hover:border-violet-400/25 hover:text-violet-200">
+              📄 Import
+              <input type="file" accept=".txt,.md,.text,text/plain" multiple className="hidden" onChange={(e) => { Array.from(e.target.files ?? []).forEach(importFile); e.target.value = ""; }} />
+            </label>
+          </div>
+          {fileName && <div className="mb-2 text-[11px] text-violet-300/70">file loaded: {fileName}</div>}
+          <textarea
+            value={fact}
+            onChange={(e) => setFact(e.target.value)}
+            rows={5}
+            placeholder={"Type or paste anything DOOF should remember — one fact per line, or a whole document. DOOF will tidy it up.\n\n\"Kareem's Honda Civic is green.\""}
+            className="w-full resize-y rounded-xl border border-white/[0.05] bg-black/40 p-2.5 text-[11px] leading-relaxed text-zinc-300 outline-none placeholder:text-zinc-800 focus:border-violet-500/20"
+          />
+          <div className="mt-2 flex items-center justify-end gap-2">
+            <GlassButton size="sm" variant="ghost" onClick={() => { setFact(""); setFileName(null); }}>Clear</GlassButton>
+            <GlassButton size="sm" disabled={busy !== null} onClick={() => void saveMemory()}>
+              {busy === "memory" ? "Saving…" : "Save to Memory"}
+            </GlassButton>
+          </div>
+          <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
+            Goes to <span className="text-zinc-400">Memory</span> only — DOOF can retrieve it but it won't change the model. To teach an example, use <span className="text-zinc-400">Write an example</span>.
+          </p>
+        </GlassPanel>
+      ) : (
+        <GlassPanel className="p-3" glow>
+          <div className="text-[12px] uppercase tracking-[0.15em] text-zinc-700">Write an example → Training</div>
+          <div className="mt-2 space-y-2">
+            <input
+              value={exPrompt}
+              onChange={(e) => setExPrompt(e.target.value)}
+              placeholder='Prompt — what someone asks. e.g. "What does Elisa drive?"'
+              className="w-full rounded-xl border border-white/[0.05] bg-black/40 px-2.5 py-1.5 text-[11px] text-zinc-300 outline-none placeholder:text-zinc-800 focus:border-violet-500/20"
+            />
+            <textarea
+              value={exResponse}
+              onChange={(e) => setExResponse(e.target.value)}
+              rows={3}
+              placeholder="DOOF's answer — the exact response you want to train on."
+              className="w-full resize-y rounded-xl border border-white/[0.05] bg-black/40 p-2.5 text-[11px] leading-relaxed text-zinc-300 outline-none placeholder:text-zinc-800 focus:border-violet-500/20"
+            />
+          </div>
+
+          {/* Optional AI assist — never auto-enters training */}
+          <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-white/[0.05] bg-white/[0.01] px-2.5 py-2">
+            <div className="text-[11px] text-zinc-500">
+              <span className="text-violet-300/80">✨ AI assist (optional)</span> — DOOF drafts the answer. It is <span className="text-zinc-300">never auto-approved</span>; you review and save.
+            </div>
+            <GlassButton size="sm" variant="ghost" disabled={busy !== null} onClick={() => void suggestAi()}>
+              {busy === "ai" ? "Thinking…" : "Suggest answer"}
+            </GlassButton>
+          </div>
+
+          <div className="mt-2.5 flex items-center justify-end gap-2">
+            <GlassButton size="sm" variant="ghost" onClick={() => { setExPrompt(""); setExResponse(""); setAiAssist(false); }}>Clear</GlassButton>
+            <GlassButton size="sm" variant="success" disabled={busy !== null} onClick={() => void saveApprove()}>
+              {busy === "dataset" ? "Saving…" : aiAssist ? "✓ Approve & Save to Training" : "✓ Save to Training"}
+            </GlassButton>
+          </div>
+          <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
+            {aiAssist
+              ? "This is an AI-assisted example. Saving is your explicit human approval to include it in the training dataset."
+              : "Saving is your explicit human approval that this example enters the training dataset."}
+          </p>
+        </GlassPanel>
+      )}
+
+      {/* Dataset library */}
+      <div className="mt-1">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-[12px] uppercase tracking-[0.15em] text-zinc-700">
+            Dataset library · {stats.total} examples
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-1.5">
+          <MetricCard label="Approved" value={stats.approved} accent />
+          <MetricCard label="In training" value={stats.training_ready} />
+          <MetricCard label="Pending" value={stats.pending} />
+        </div>
+
+        <div className="mt-2 flex items-center gap-2">
+          {(["all", "pending", "in_training"] as const).map((f) => (
+            <GlassButton key={f} variant={filter === f ? "primary" : "ghost"} size="sm" onClick={() => setFilter(f)}>
+              {f === "in_training" ? "In training" : f.charAt(0).toUpperCase() + f.slice(1)}
+            </GlassButton>
+          ))}
+          <div className="flex-1" />
+          <GlassButton variant="ghost" onClick={() => void load()}>↻</GlassButton>
+        </div>
+
+        <div className="mt-2 space-y-1.5">
+          {loading && examples.length === 0 && (
+            <div className="py-10 text-center text-[10px] text-zinc-800">Loading…</div>
+          )}
+          {!loading && filtered.length === 0 && (
+            <div className="py-10 text-center text-[10px] text-zinc-800">
+              {examples.length === 0 ? "No examples yet. Add one above." : "Nothing in this view."}
+            </div>
+          )}
+          {filtered.map((ex) => {
+            const dupKey = normalizeForDup(ex.prompt, ex.response);
+            const isDup = (dupKeys.get(dupKey) ?? 0) > 1;
+            const src = sourceLabel(ex);
+            if (editingId === ex.id) {
+              return (
+                <GlassPanel key={ex.id} className="p-3">
+                  <input
+                    value={editPrompt}
+                    onChange={(e) => setEditPrompt(e.target.value)}
+                    className="w-full rounded-lg border border-white/[0.05] bg-black/40 px-2 py-1.5 text-[11px] text-zinc-300 outline-none focus:border-violet-500/20"
+                  />
+                  <textarea
+                    value={editResponse}
+                    onChange={(e) => setEditResponse(e.target.value)}
+                    rows={2}
+                    className="mt-1.5 w-full resize-y rounded-lg border border-white/[0.05] bg-black/40 px-2 py-1.5 text-[11px] text-zinc-300 outline-none focus:border-violet-500/20"
+                  />
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <GlassButton size="sm" onClick={() => void saveEdit()}>Save</GlassButton>
+                    <GlassButton size="sm" variant="ghost" onClick={() => setEditingId(null)}>Cancel</GlassButton>
+                  </div>
+                </GlassPanel>
+              );
+            }
+            return (
+              <div key={ex.id} className="rounded-xl border border-white/[0.05] bg-white/[0.01] px-3 py-2.5 transition-all hover:border-white/[0.08]">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[11px] font-medium text-zinc-400">Q: {ex.prompt}</div>
+                    <div className="mt-1 text-[10px] leading-snug text-zinc-300">{ex.response}</div>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-zinc-700">
+                      <span className={["rounded-full border px-2 py-0.5 text-[11px]", src.cls].join(" ")}>{src.label}</span>
+                      {ex.approved ? (
+                        <StatusBadge tone="online">{ex.training_ready ? "In training" : "Approved"}</StatusBadge>
+                      ) : (
+                        <StatusBadge tone="warning">Pending</StatusBadge>
+                      )}
+                      {isDup && <span className="text-amber-400/80">⚠ duplicate</span>}
+                      <span>by {ex.created_by || "local"}</span>
+                      <span>· {ex.created_at?.slice(0, 10)}</span>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <GlassButton size="sm" variant={ex.approved ? "ghost" : "success"} disabled={busyId === ex.id} onClick={() => void toggle(ex)}>
+                      {busyId === ex.id ? "…" : ex.approved ? "Un-approve" : "Approve"}
+                    </GlassButton>
+                    <GlassButton size="sm" variant="ghost" onClick={() => { setEditingId(ex.id); setEditPrompt(ex.prompt); setEditResponse(ex.response); }}>
+                      Edit
+                    </GlassButton>
+                    <GlassButton size="sm" variant="danger" onClick={() => setConfirmDeleteId(ex.id)}>Delete</GlassButton>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Delete confirm */}
+      {confirmDeleteId && (
+        <GlassPanel className="border-rose-400/20 p-3" glow>
+          <div className="mb-2 text-[11px] text-zinc-300">Delete this training example permanently?</div>
+          <div className="flex items-center gap-2">
+            <GlassButton size="sm" variant="danger" onClick={() => void remove()}>Delete</GlassButton>
+            <GlassButton size="sm" variant="ghost" onClick={() => setConfirmDeleteId(null)}>Cancel</GlassButton>
+          </div>
+        </GlassPanel>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
+  return (
+    <ToastProvider>
+      <NotificationProvider>
+        <AppShell />
+      </NotificationProvider>
+    </ToastProvider>
+  );
+}
+
+function AppShell() {
   const [profile, setProfile] = useState<Profile | null | undefined>(undefined);
   const [page, setPage] = useState<Page>("chat");
   const [online, setOnline] = useState(false);
@@ -2148,6 +3567,28 @@ export default function App() {
   // 'verifying' | 'verified' | 'error' | null (email confirmation landing)
   const [verifyState, setVerifyState] = useState<"verifying" | "verified" | "error" | null>(null);
   const [verifyMsg, setVerifyMsg] = useState("");
+
+  // Preload easter-egg assets in background (fire and forget, never blocks)
+  useEffect(() => { preloadEasterEggAssets(); }, []);
+
+  // Rare idle easter eggs — ~2% chance per 60s while idle (watch or massage chair)
+  const [showWatchToast, setShowWatchToast] = useState(false);
+  const [showChairEgg, setShowChairEgg] = useState(false);
+  useEffect(() => {
+    if (!booted) return;
+    const interval = setInterval(() => {
+      if (Math.random() < 0.02 && !busy) {
+        if (Math.random() < 0.6) {
+          setShowWatchToast(true);
+          setTimeout(() => setShowWatchToast(false), 4500);
+        } else {
+          setShowChairEgg(true);
+          setTimeout(() => setShowChairEgg(false), 10500);
+        }
+      }
+    }, 60000);
+    return () => clearInterval(interval);
+  }, [booted, busy]);
 
   // Validate stored session / handle OAuth + email-verification redirects
   useEffect(() => {
@@ -2192,7 +3633,7 @@ export default function App() {
       return;
     }
 
-    // --- Google OAuth (Supabase implicit flow) returned to us ---
+    // --- Google OAuth (Cloud Sync implicit flow) returned to us ---
     const m = hash.match(/access_token=([^&]+)/);
     if (m) {
       history.replaceState(null, "", window.location.pathname);
@@ -2434,6 +3875,10 @@ export default function App() {
 
       <NaddafAtmosphere />
 
+      {/* Easter-egg assets — preload in background, never block */}
+      <HondaCivicDrive />
+      <NotificationToast />
+
       <div className="relative z-10 flex h-full">
         <Sidebar
           page={page}
@@ -2459,18 +3904,29 @@ export default function App() {
                 sett={sett}
                 inputRef={inputRef}
                 bottomRef={bottomRef}
+                setPage={setPage}
               />
             )}
+            {page === "teach" && <TeachTab online={online} />}
             {page === "memory" && <MemoryTab online={online} />}
             {page === "training" && <TrainingTab online={online} />}
+            {page === "network" && <LegacyNetworkTab online={online} />}
             {page === "status" && <StatusTab online={online} />}
             {page === "models" && <ModelsTab online={online} />}
             {page === "settings" && (
               <SettingsTab online={online} hw={hw} onLogout={() => void doLogout()} />
             )}
+            {page === "updates" && <UpdatesTab />}
+            {page === "admin" && <AdminTab online={online} />}
+            {page === "rewards" && <RewardsTab />}
+            {page === "feedback" && <FeedbackTab online={online} />}
           </div>
         </main>
       </div>
+
+      {/* Rare Walmart watch / massage chair easter eggs — idle only */}
+      <WalmartWatchToast show={showWatchToast} />
+      <MassageChairEgg show={showChairEgg} />
     </div>
   );
 }
